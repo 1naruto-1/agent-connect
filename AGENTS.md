@@ -4,22 +4,6 @@
 
 agent-connect migrates one persisted coding-agent session at a time between Cursor, Claude Code, Codex CLI, and Pi. It is a zero-runtime-dependency ESM CLI that requires Node.js 23.4 or later because Cursor integration uses `node:sqlite`.
 
-## Repository map
-
-| Path | Responsibility |
-| --- | --- |
-| `bin/agent-connect.js` | CLI entry point, Node-version gate, and command routing |
-| `src/commands/` | Interactive, list, direct-migration, and command-install handlers |
-| `src/adapters/` | One native session reader/writer adapter per supported tool |
-| `src/adapters/index.js` | Adapter registry |
-| `src/events.js` | Canonical event vocabulary, migration statistics, and report rendering |
-| `src/migrate.js` | Read → normalize → provenance marker → write orchestration |
-| `src/cursor.js` / `src/cursor-writer.js` | Cursor SQLite access and legacy composer serialization |
-| `commands/` | Claude Code slash-command prompts; not session-format templates |
-| `docs/architecture.md` | Architecture, storage, adapter contract, and maintenance guide |
-| `README.md` | Default English user documentation |
-| `README.zh.md` | Simplified Chinese user documentation |
-
 ## Architecture rules
 
 - Preserve the adapter boundary. Tool-specific parsing, storage paths, and native record shapes belong in the corresponding module under `src/adapters/` (or the dedicated Cursor helpers), never in `src/migrate.js`.

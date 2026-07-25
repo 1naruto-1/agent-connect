@@ -1,94 +1,133 @@
-# agent-connect
+# Agent Connect
 
-**在 Cursor、Claude Code、Codex CLI、Pi 之间无损迁移会话** —— 在一个工具里开始的对话，搬到另一个工具里继续，不写交接文档，不做摘要。
+**让同一份 Agent 会话在不同 Harness 之间继续。**
+
+目前支持 **Cursor、Claude Code、Codex CLI 和 Pi**，覆盖四者之间全部 12 个迁移方向。
 
 [English](README.md) · [Architecture](docs/architecture.md)
 
-## 它解决什么问题
+## 功能
 
-不同 AI 编程工具的上下文互不相通：在 Cursor 里做了一半的项目，想换 Claude Code 继续，只能写交接文档重新描述——效果远不如原对话。agent-connect 把会话**逐事件**（完整对话、思考块、每一次工具调用与结果、文件编辑、终端输出）转换后写入目标工具的**原生会话存储**，用目标工具**自己的恢复机制**加载，打开直接说"继续"。
+不同 Agent Harness 的会话彼此隔离：在 Cursor 中完成一半的任务，切换到 Claude Code、Codex 或 Pi 后，通常只能重新描述需求，或者手工整理一份交接摘要。
 
-## 30 秒上手
+Agent Connect 直接读取源 Harness 的本地会话记录，将其转换成统一事件流，再写入目标 Harness 的原生会话存储。迁移完成后，可以使用目标工具自己的恢复方式继续工作，不需要重新生成历史，也不需要手写交接文档。
+
+迁移内容包括：
+
+- 用户消息与助手回复
+- 思考块（源存储可读取且目标格式支持时）
+- 工具调用、调用参数、执行结果与错误状态
+- 文件读取、写入和编辑记录
+- 终端命令与输出
+- 搜索、网页、待办、用户提问、子代理和 MCP 调用
+
+目标 Harness 没有对应工具格式时，Agent Connect 会把完整参数和结果保留为可读文本，而不是静默丢弃。每次迁移还会在当前项目的 `.agent-connect/` 下生成报告，方便核对处理结果。
+
+## 快速开始
+
+> 需要 Node.js 23.4 或更高版本。项目使用 Node.js 内置的 `node:sqlite` 读取 Cursor 会话，不依赖第三方运行时包。
+
+### 安装
 
 ```bash
-# 安装 (需要 Node.js >= 23.4)
 git clone https://github.com/1naruto-1/agent-connect.git
-cd agent-connect && npm install -g .
+cd agent-connect
+npm install -g .
+```
 
-# 在你的项目目录里运行
-cd 你的项目
+### 接续会话
+
+进入会话所属的项目目录，然后运行：
+
+```bash
+cd /path/to/your-project
 agent-connect
 ```
 
-跟着提示走两步——选会话、选目标工具——完成后按提示用目标工具原生方式打开：
+按照提示完成两步：
 
-```
-当前项目的会话 (5 个):
+1. 选择需要接续的源会话。
+2. 选择目标 Harness。
 
-   1. [cursor] 07-24 15:08  设计跨工具上下文迁移
-   2. [claude] 07-24 13:55  安装 brainstorming
-   3. [codex ] 07-21 07:08  重构登录模块
-   ...
+迁移完成后，终端会显示事件统计、迁移报告路径和目标会话的恢复命令：
 
-迁移哪个会话? 输入编号: 1
+```text
+完成: 用户消息×3, 助手正文×27, 思考块×28, 工具调用 read×2, web-search×8
+报告: /path/to/project/.agent-connect/report-cursor-to-claude-xxxxxxxx.md
 
-  1. Claude Code
-  2. Codex CLI
-  3. Pi
-
-迁移到哪个工具? 输入编号: 1
-
-完成: 用户消息×3, 助手正文×27, 思考块×28, 工具调用 read×2, web-search×8 ...
-继续会话: claude --resume 0c8ccb21-...  (或在 Claude Code 中 /resume 选择该会话)
+继续会话: claude --resume 0c8ccb21-...
 ```
 
-## 全部用法
+## 使用方法
 
 | 命令 | 作用 |
-|---|---|
-| `agent-connect` | 交互式迁移（推荐） |
-| `agent-connect list` | 跨工具列出当前项目的所有会话 |
-| `agent-connect to <目标> [会话id]` | 直达迁移，目标 ∈ `cursor` `claude` `codex` `pi`，id 可用前缀 |
+| --- | --- |
+| `agent-connect` | 交互式选择一个源会话和目标 Harness |
+| `agent-connect list` | 列出当前项目在所有已支持 Harness 中的会话 |
+| `agent-connect list --json` | 以 JSON 格式输出会话列表 |
+| `agent-connect to <目标> [会话]` | 直接迁移一个会话，目标为 `cursor`、`claude`、`codex` 或 `pi` |
 | `agent-connect install` | 安装 Claude Code 斜杠命令 |
 
-装完斜杠命令后，在 Claude Code 里可直接用 `/resume-cursor`、`/resume-codex`、`/resume-pi` 把其他工具的会话迁进来。
+`agent-connect to` 的会话参数可以使用会话 ID 前缀或标题关键词；省略时，会选择最近一个来源不同于目标 Harness 的会话。
 
-各工具的恢复方式（迁移完成时会原样打印）：
+安装斜杠命令后，可以在 Claude Code 中使用：
 
-- **Claude Code**: `claude --resume <id>`，或 `/resume` 选择同名会话
-- **Codex CLI**: `codex resume <id>`
-- **Pi**: `pi --session <id>`，或 `pi --resume` 选择
-- **Cursor**: 打开项目，会话历史里选择同名会话
+- `/resume-cursor`
+- `/resume-codex`
+- `/resume-pi`
 
-## 迁移了什么、怎么迁
+这些命令用于把对应 Harness 的会话接续到 Claude Code。其他迁移方向使用终端 CLI。
 
-中心辐射架构：每个工具一个适配器（读 + 写），中间是统一事件流。4 个工具覆盖全部 12 个迁移方向。
+### 恢复目标会话
 
-| 工具 | 会话存储 | 读 | 写 |
-|---|---|---|---|
-| Claude Code | `~/.claude/projects/*/`（JSONL） | ✓ | ✓ |
-| Cursor | `state.vscdb`（SQLite，只读打开） | ✓ | ✓（需退出 Cursor） |
-| Codex CLI | `~/.codex/sessions/`（JSONL） | ✓ | ✓ |
-| Pi | `~/.pi/agent/sessions/`（JSONL） | ✓ | ✓ |
+| 目标 Harness | 恢复方式 |
+| --- | --- |
+| Claude Code | `claude --resume <id>`，或在 Claude Code 中使用 `/resume` |
+| Codex CLI | `codex resume <id>` |
+| Pi | `pi --session <id>`，或使用 `pi --resume` |
+| Cursor | 启动 Cursor 打开当前项目，在会话历史中选择同名会话 |
 
-工具调用在统一词表间映射（终端、读/写/编辑文件、搜索、网页、待办、提问、子代理、MCP）。**转换纪律：默认全量保留，绝不擅自摘要或丢弃**；目标工具没有对应物的调用，转为参数与结果完整保留的正文文本；每次迁移的处理明细写入 `.agent-connect/report-*.md` 供核对。
+## 接续原理
 
-## 常见问题
+Agent Connect 使用中心辐射架构：每个 Harness 提供一个读取器和写入器，中间通过统一事件流连接。因此，4 个适配器即可覆盖 12 个迁移方向，而不需要为每一对工具单独实现转换器。
 
-**报错 "Cursor 正在运行"** —— 写入 Cursor 数据库前必须完全退出 Cursor（系统托盘图标也要退出）。只读方向（从 Cursor 迁出）不受影响。
+```text
+源 Harness 原生会话
+        │
+        ▼
+   Source Adapter
+        │
+        ▼
+    统一事件流
+        │
+        ▼
+   Target Adapter
+        │
+        ▼
+目标 Harness 原生会话
+```
 
-**报错 "需要 Node.js >= 23.4"** —— 读 Cursor 用了 Node 内置 `node:sqlite`（因此本工具零依赖）。`nvm install 24` 即可。
+迁移不会调用模型重放历史，也不会修改源会话。目标适配器会生成新的会话 ID，并按照目标 Harness 的原生格式写入消息、思考块、工具调用和结果。
 
-**迁到 Codex 后思考块显示为 `[思考过程]` 消息** —— Codex 的原生思考记录是加密格式无法构造，这是有意的降级表示，内容完整保留。
+| Harness | 原生会话存储 | 读取 | 写入 |
+| --- | --- | --- | --- |
+| Cursor | `state.vscdb`（SQLite） | 支持，只读打开 | 支持，需要完全退出 Cursor |
+| Claude Code | `~/.claude/projects/*/*.jsonl` | 支持 | 支持 |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | 支持 | 支持 |
+| Pi | `~/.pi/agent/sessions/--<项目>--/*.jsonl` | 支持 | 支持 |
 
-**列表里没有我的会话** —— agent-connect 按项目目录过滤会话，请在对应项目目录下运行。
+更完整的事件模型、适配器契约和存储说明见 [架构文档](docs/architecture.md)。
 
-**某方向迁移后显示异常** —— 各工具内部格式随版本演进（验证环境：Windows + Cursor 3.9 / Claude Code 2.1 / Codex 0.144 / Pi 0.82）。欢迎带着 `.agent-connect/` 下的报告开 issue。
+## 注意事项
 
-## 文档
+- **只处理当前项目的会话**：请在会话所属的项目目录中运行 Agent Connect。
+- **写入 Cursor 前必须退出 Cursor**：包括系统托盘中的 Cursor 进程；从 Cursor 读取会话不受影响。
+- **每次迁移都会创建新会话**：当前没有内置批量迁移和重复导入检测。
+- **Codex 思考块会降级显示**：Codex 的原生 reasoning 内容采用无法直接构造的格式，因此会以带 `[思考过程]` 前缀的助手消息保留。
+- **原生格式可能随版本变化**：当前验证环境为 Windows、Cursor 3.9、Claude Code 2.1、Codex CLI 0.144 和 Pi 0.82。
 
-- [架构说明](docs/architecture.md)（英文）：仓库布局、统一事件模型、适配器、存储位置和迁移流程。
+如果迁移结果显示异常，请查看 `.agent-connect/` 下的报告，并在提交 Issue 前移除其中的路径、提示词、终端输出和凭据等敏感信息。
 
 ## License
 
-MIT
+[MIT](LICENSE)
