@@ -307,7 +307,7 @@ jobs:
             gh release delete "$tag" --yes
           fi
 
-          create_args=("$tag" --draft --verify-tag --generate-notes --title "Agent Connect $tag")
+          create_args=("$tag" --draft --generate-notes --title "Agent Connect $tag")
           if [ "$PRERELEASE" = 'true' ]; then create_args+=(--prerelease); fi
           gh release create "${create_args[@]}"
 
