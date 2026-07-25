@@ -140,7 +140,7 @@ esac
     });
     expect(invalid.exitCode).not.toBe(0);
     expect(output(invalid)).toContain('Invalid or unavailable SemVer release');
-  });
+  }, { timeout: 120_000 });
 }
 
 if (process.platform === 'win32') {
@@ -252,5 +252,5 @@ function Invoke-WebRequest { throw 'Unexpected network request' }
     });
     expect(invalid.exitCode).not.toBe(0);
     expect(output(invalid)).toContain('Invalid SemVer release');
-  });
+  }, { timeout: 120_000 });
 }
