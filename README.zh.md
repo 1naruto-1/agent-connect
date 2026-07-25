@@ -35,7 +35,7 @@ Agent Connect 以独立二进制发布。使用者不需要安装 Node.js、npm 
 irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.ps1 | iex
 ```
 
-安装器将 `agent-connect.exe` 安装到 `%USERPROFILE%\.local\bin`；若该目录尚未位于用户 `PATH`，会自动追加。安装后请打开新的终端。
+安装器会解析最新发布的稳定版 GitHub Release，下载其中的 `agent-connect-v<版本>-windows-x64.exe` 并按照该 Release 的 `SHA256SUMS` 校验。随后将其安装到 `%USERPROFILE%\.local\bin`；若该目录尚未位于用户 `PATH`，会自动追加。安装后请打开新的终端。
 
 #### macOS 与 Linux
 
@@ -43,7 +43,9 @@ irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/insta
 curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
 ```
 
-安装器将二进制安装到 `~/.local/bin/agent-connect`，并校验 GitHub Release 的 `SHA256SUMS`。
+安装器会解析最新发布的稳定版 GitHub Release，按照当前操作系统和 CPU 架构下载二进制，将其安装到 `~/.local/bin/agent-connect`，并校验该 Release 的 `SHA256SUMS`；必要时会将安装目录写入 POSIX Shell 的 `PATH` 配置。验证前请打开新 Shell；fish 用户需要执行安装器输出的 `fish_add_path` 命令。
+
+上述快速安装命令会从可变的 `main` 分支获取安装器本身。需要可复现或更严格的安全验证时，请检查并使用[带 Tag 且固定版本的安装方式](docs/distribution.md#how-installers-resolve-a-release)。`SHA256SUMS` 可以发现损坏，但它与二进制一同发布，并不是独立签名。
 
 验证安装：
 
@@ -161,7 +163,7 @@ Agent Connect 仅将自身生成的迁移报告存入平台标准数据目录；
 
 ## 开发
 
-协作者需要 Bun 1.3.14 或更高版本。请阅读[开发环境](docs/development-environment.md)、[开发工作流](docs/development.md)与[发行说明](docs/distribution.md)。
+协作者需要 Bun 1.3.14 或更高版本。请阅读仓库的[贡献规则](AGENTS.md)、[开发环境](docs/development-environment.md)、[开发工作流](docs/development.md)与维护者使用的 [CI 和发行清单](docs/distribution.md)。
 
 ## License
 

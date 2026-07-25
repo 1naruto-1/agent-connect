@@ -36,7 +36,10 @@ bun install --frozen-lockfile
 bun run check
 bun run src/cli.ts --help
 bun run build
+bun run smoke:build
+bun run verify:checksums
 git diff --check
+git diff --cached --check
 ```
 
 For adapter changes, use disposable session data and cover session discovery, reading, writing, and unavailable-tool behavior. Never test destructive behavior against valuable live sessions. Cursor must be completely closed, including its tray process, before any write test.
@@ -65,3 +68,10 @@ chore: normalize repository metadata
 ```
 
 Keep each commit focused and include verification in the pull request description. For migration behavior changes, name the source and target tools, include safe sample output, and link the relevant issue when one exists.
+
+## Releases
+
+- Follow `docs/distribution.md`; do not infer the release process from an old command or move an existing release tag.
+- `package.json.version` is the sole version source, and a release tag must match it exactly as `v<version>`.
+- Push the release commit to `main` and wait for the full CI matrix before creating the annotated or signed tag.
+- Never commit `dist/`; the tag workflow rebuilds, verifies, attests, and publishes all release assets.

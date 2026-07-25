@@ -1,6 +1,6 @@
 # Development environment
 
-[Architecture](architecture.md) · [Development workflow](development.md) · [Distribution](distribution.md)
+[Architecture](architecture.md) · [Development workflow](development.md) · [Distribution](distribution.md) · [Contributor rules](../AGENTS.md)
 
 Agent Connect uses **Bun 1.3.14** and strict TypeScript for development. End users run a standalone binary and do **not** need Bun or Node.js installed.
 
@@ -8,10 +8,11 @@ Agent Connect uses **Bun 1.3.14** and strict TypeScript for development. End use
 
 | Tool | Required version | Why |
 | --- | --- | --- |
-| Bun | 1.3.14 or newer | Runtime, package manager, test runner, bundler, and `bun:sqlite` |
+| Bun | Version declared by `package.json#packageManager` (currently 1.3.14+) | Runtime, package manager, test runner, bundler, and `bun:sqlite` |
 | Git | Current | Source checkout and release tags |
+| POSIX shell | Current; release maintainers only | Git Bash, WSL, macOS, or Linux for release/preflight snippets |
 
-Install Bun from its official installer:
+Install Bun from its official installer, then open a new terminal (or load the installer-reported shell configuration) before verifying it:
 
 ```powershell
 # Windows PowerShell
@@ -27,8 +28,10 @@ Verify the development environment:
 
 ```sh
 bun --version
-# Expected: 1.3.14 or newer
+# Expected: package.json#packageManager, currently 1.3.14
 ```
+
+The CI workflows read Bun's exact version from `package.json#packageManager`. When upgrading Bun, update that field, the minimum `engines.bun` range, `@types/bun`, `bun.lock`, and the human-readable version references in this guide, both READMEs, and `AGENTS.md` in the same pull request.
 
 ## First checkout
 
@@ -51,6 +54,9 @@ bun run check
 | `bun run check` | Run type checking and tests together |
 | `bun run build` | Build a standalone binary for the current platform |
 | `bun run build -- --all` | Build every release target and `SHA256SUMS` |
+| `bun run smoke:build` | Execute the current-platform standalone binary |
+| `bun run verify:checksums` | Verify artifacts listed in `dist/SHA256SUMS` |
+| `bun run verify:checksums -- --all` | Require and verify all five release binaries |
 | `bun run src/cli.ts paths` | Print the current application-data and executable locations |
 
 ## Isolated development data
@@ -58,7 +64,8 @@ bun run check
 Never develop or test against valuable live agent sessions. Override only Agent Connect's own data root when needed:
 
 ```sh
-AGENT_CONNECT_DATA_DIR="$(mktemp -d)" bun run src/cli.ts paths
+export AGENT_CONNECT_DATA_DIR="$(mktemp -d)"
+bun run src/cli.ts paths
 ```
 
 ```powershell
@@ -66,7 +73,7 @@ $env:AGENT_CONNECT_DATA_DIR = Join-Path $env:TEMP 'agent-connect-dev'
 bun run src/cli.ts paths
 ```
 
-This override affects migration reports and future Agent Connect data only. It does not redirect Cursor, Claude Code, Codex CLI, or Pi session stores. Use redacted fixtures and temporary native-store roots for adapter tests.
+This override affects migration reports and future Agent Connect data only. It does not redirect Cursor, Claude Code, Codex CLI, or Pi session stores and does not make real adapter writes safe. Use redacted fixtures and temporary native-store roots for adapter tests.
 
 ## TypeScript boundaries
 

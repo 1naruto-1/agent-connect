@@ -16,7 +16,7 @@ Agent Connect is distributed as a standalone binary. You do not need Node.js, np
 irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.ps1 | iex
 ```
 
-The installer places `agent-connect.exe` in `%USERPROFILE%\.local\bin` and adds that directory to your user `PATH` only when needed. Open a new terminal afterwards.
+The installer resolves the latest published stable GitHub Release, downloads the matching `agent-connect-v<version>-windows-x64.exe`, and verifies it against that release's `SHA256SUMS`. It places `agent-connect.exe` in `%USERPROFILE%\.local\bin` and adds that directory to your user `PATH` only when needed. Open a new terminal afterwards.
 
 ### macOS and Linux
 
@@ -24,7 +24,9 @@ The installer places `agent-connect.exe` in `%USERPROFILE%\.local\bin` and adds 
 curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
 ```
 
-The installer places the binary in `~/.local/bin/agent-connect`, adds that directory to your shell `PATH` only when needed, and verifies the downloaded binary against the GitHub Release `SHA256SUMS` file.
+The installer resolves the latest published stable GitHub Release, downloads the matching operating-system and CPU artifact, places it in `~/.local/bin/agent-connect`, verifies it against the release `SHA256SUMS` file, and updates the relevant POSIX shell `PATH` configuration when needed. Start a new shell before verification; fish users should run the printed `fish_add_path` command.
+
+The quick-install commands fetch the installer itself from the mutable `main` branch. For reproducible or security-sensitive installation, inspect and run the [tagged, version-pinned installer](docs/distribution.md#how-installers-resolve-a-release). `SHA256SUMS` detects corruption but is not an independent signature because it is distributed with the binaries.
 
 Verify the installation:
 
@@ -91,7 +93,7 @@ Use `AGENT_CONNECT_DATA_DIR` only when you intentionally need to override this l
 
 ## Development
 
-Contributors need Bun 1.3.14 or newer. See [Development environment](docs/development-environment.md), [Development workflow](docs/development.md), and [Distribution](docs/distribution.md).
+Contributors need Bun 1.3.14 or newer. Read the repository [contributor rules](AGENTS.md), [development environment](docs/development-environment.md), [development workflow](docs/development.md), and maintainer [CI and release checklist](docs/distribution.md).
 
 ## License
 
