@@ -12,11 +12,16 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Get-ReleaseVersion([string]$RequestedVersion, [string]$Repo) {
-  if ($RequestedVersion -ne 'latest') { return $RequestedVersion.TrimStart('v') }
+  if ($RequestedVersion -ne 'latest') {
+    if ($RequestedVersion.StartsWith('v')) { return $RequestedVersion.Substring(1) }
+    return $RequestedVersion
+  }
   $headers = @{ 'User-Agent' = 'agent-connect-installer'; 'Accept' = 'application/vnd.github+json' }
   $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
   if (-not $release.tag_name) { throw 'GitHub did not return a latest release tag.' }
-  return $release.tag_name.ToString().TrimStart('v')
+  $tag = $release.tag_name.ToString()
+  if (-not $tag.StartsWith('v')) { throw "GitHub returned an invalid release tag: $tag" }
+  return $tag.Substring(1)
 }
 
 function Get-Sha256([string]$Path) {
@@ -50,8 +55,8 @@ $ReleaseUrl = "https://github.com/$Repository/releases/download/v$Version"
 $UserHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $InstallDir = if ($env:AGENT_CONNECT_BIN_DIR) { $env:AGENT_CONNECT_BIN_DIR } else { Join-Path $UserHome '.local\bin' }
 $Destination = Join-Path $InstallDir 'agent-connect.exe'
-$Stage = Join-Path $InstallDir ".agent-connect-$Version-$PID.exe"
-$ChecksumFile = Join-Path ([IO.Path]::GetTempPath()) "agent-connect-$Version-$PID-SHA256SUMS"
+$Stage = Join-Path $InstallDir ".agent-connect-$Version-$([Guid]::NewGuid().ToString('N')).exe"
+$ChecksumFile = Join-Path ([IO.Path]::GetTempPath()) "agent-connect-$Version-$([Guid]::NewGuid().ToString('N'))-SHA256SUMS"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 try {
