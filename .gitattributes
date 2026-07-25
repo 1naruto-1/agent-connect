@@ -1,0 +1,18 @@
+# Keep repository text stable across platforms.
+* text=auto eol=lf
+
+# Source, metadata, and documentation are UTF-8 text with LF endings.
+*.js text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
+
+# Treat common binary assets as binary if they are introduced later.
+*.gif binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.webp binary

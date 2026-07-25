@@ -1,0 +1,117 @@
+# Architecture
+
+[English](../README.md) · [简体中文](../README.zh.md)
+
+## Overview
+
+agent-connect migrates one coding-agent session at a time between Cursor, Claude Code, Codex CLI, and Pi. It does not replay the conversation against a model. Instead, it reads the source tool's persisted session, converts its meaningful history into a canonical event stream, and writes new historical records to the target tool's native session store. The target tool can then resume the imported session through its normal UI or CLI.
+
+```text
+source native store
+  │
+  ▼
+source adapter: listSessions / readSession
+  │
+  ▼
+canonical event stream
+  │
+  ▼
+target adapter: writeReady / writeSession
+  │
+  ├──► target native store
+  └──► .agent-connect/report-<source>-to-<target>-<id>.md
+```
+
+## Repository layout
+
+```text
+bin/agent-connect.js       CLI entry point and command router
+src/
+  adapters/                One reader/writer adapter per supported tool
+  commands/                Interactive, list, direct-migration, and install commands
+  events.js                Canonical event model, statistics, and report rendering
+  migrate.js               Read → normalize → annotate → write orchestration
+  cursor.js                Cursor SQLite read helpers
+  cursor-writer.js         Cursor SQLite write helpers and legacy composer shape
+commands/                  Claude Code slash-command templates
+README.md                  Default English project documentation
+README.zh.md               Simplified Chinese project documentation
+docs/                      Design and maintenance documentation
+AGENTS.md                  Contributor and agent guidance
+```
+
+## Canonical event model
+
+`src/events.js` defines the loss-preserving interchange layer. Adapters produce and consume an ordered array of these event kinds:
+
+| Event kind | Core fields | Purpose |
+| --- | --- | --- |
+| `user` | `ts`, `text` | A human prompt |
+| `assistant-text` | `ts`, `text` | A visible assistant response |
+| `thinking` | `ts`, `text`, `signature` | A recorded reasoning block where supported |
+| `tool` | `ts`, `tool`, `input`, `output`, `isError`, `origName` | A tool call together with its result |
+| `marker` | `ts`, `text` | Migration provenance, compaction, or an unsupported event record |
+
+Tool calls use a small shared vocabulary: terminal, file read/write/edit, glob, grep, web search/fetch, todos, user questions, subagents, MCP, and `other`. A target adapter maps supported calls back to a native tool representation. When it cannot represent a call natively, it preserves its arguments and result as text rather than silently omitting it.
+
+## Adapter contract
+
+Every module in `src/adapters/` exports the same operational surface:
+
+| Function / value | Responsibility |
+| --- | --- |
+| `id`, `label` | Stable CLI identifier and display name |
+| `available()` | Whether the corresponding local tool storage is available |
+| `listSessions(cwd)` | Find sessions belonging to the current project |
+| `readSession(cwd, sessionId)` | Parse a native session into canonical events |
+| `writeReady()` | Return a preflight error, if any, before a write |
+| `writeSession(cwd, title, events)` | Persist canonical events in the target format |
+| `writeNotes` | Target-specific notes included in the migration report |
+
+`src/adapters/index.js` is the single registry. Add an adapter there only after its reader and writer both satisfy this contract.
+
+## Native storage integrations
+
+| Tool | Session store | Implementation notes |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects/*/*.jsonl` | Writes JSONL messages, tool-use/result pairs, and session metadata. |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Writes rollout JSONL; reuses configuration details from a recent native Codex session when available. |
+| Pi | `~/.pi/agent/sessions/--<project>--/*.jsonl` | Writes a session header plus linked message and tool-result records. |
+| Cursor | Cursor `state.vscdb` SQLite database | Reads read-only; writes only new rows after Cursor is fully closed. `cursor-writer.js` constructs the legacy composer and bubble shapes. |
+
+All adapters generate new target session identifiers. A migration never modifies the source session.
+
+## Migration lifecycle
+
+`migrate(cwd, sourceId, sessionId, targetId)` in `src/migrate.js` performs the following steps:
+
+1. Resolve source and target adapters and reject identical tools.
+2. Run the target preflight check.
+3. Read the selected source session into canonical events.
+4. Add a provenance marker so the resumed agent knows the conversation was imported.
+5. Write a new target-native session.
+6. Store a human-readable report under `.agent-connect/` in the project being migrated.
+
+The public CLI currently performs **one migration per invocation**. `agent-connect list --json` can support external automation, but there is no built-in batch mode or import deduplication.
+
+## CLI and slash commands
+
+`bin/agent-connect.js` dispatches the following command modules:
+
+| Command | Module | Role |
+| --- | --- | --- |
+| `agent-connect` | `src/commands/interactive.js` | Pick one source session and one available target |
+| `agent-connect list [--json]` | `src/commands/list.js` | List sessions for the current project |
+| `agent-connect to <target> [id]` | `src/commands/to.js` | Directly migrate one selected session |
+| `agent-connect install` | `src/commands/install.js` | Copy Claude Code slash-command templates from `commands/` |
+
+The Markdown files under `commands/` are Claude Code command prompts that call the CLI; they are not session-format templates.
+
+## Maintenance rules
+
+- Keep native-format logic inside the relevant adapter; do not add tool-specific parsing to `migrate.js` or `events.js`.
+- Preserve ordering, timestamps, inputs, outputs, and error status whenever a source format exposes them.
+- Document unavoidable format downgrades in the adapter's `writeNotes` and verify that the migration report explains them.
+- Treat session stores as sensitive data. Do not commit captured sessions, reports, tokens, or unredacted tool output.
+- For Cursor writes, ensure the application and tray process are completely closed; the writer must only insert new session rows.
+- Update both root READMEs and this document when adding a tool, changing the canonical event vocabulary, or changing a storage layout.

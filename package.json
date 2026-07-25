@@ -13,8 +13,9 @@
     "bin",
     "src",
     "commands",
+    "docs",
     "README.md",
-    "README.en.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "author": "L <3611291419@qq.com>",
