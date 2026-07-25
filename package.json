@@ -1,0 +1,29 @@
+{
+  "name": "agent-connect",
+  "version": "0.1.0",
+  "description": "Cursor / Claude Code / Codex CLI / Pi 会话互迁 (lossless session migration between AI coding tools)",
+  "type": "module",
+  "bin": {
+    "agent-connect": "bin/agent-connect.js"
+  },
+  "engines": {
+    "node": ">=23.4"
+  },
+  "files": [
+    "bin",
+    "src",
+    "commands",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "author": "L <3611291419@qq.com>",
+  "keywords": [
+    "cursor",
+    "claude-code",
+    "session",
+    "migration",
+    "context"
+  ],
+  "license": "MIT"
+}
