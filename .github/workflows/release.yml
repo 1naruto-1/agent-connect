@@ -33,16 +33,25 @@ jobs:
       - run: bun run scripts/check-release.ts "$GITHUB_REF_NAME"
       - name: Validate annotated tag and main ancestry
         id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != 'tag' ]; then
+          ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")"
+          if [ "$(jq -r '.object.type' <<<"$ref")" != 'tag' ]; then
             echo 'Release tags must be annotated or signed, not lightweight.' >&2
             exit 1
           fi
-          release_sha="$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
+          tag_object="$(jq -r '.object.sha' <<<"$ref")"
+          tag_data="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object")"
+          if [ "$(jq -r '.object.type' <<<"$tag_data")" != 'commit' ]; then
+            echo 'Release tag must point directly to a commit.' >&2
+            exit 1
+          fi
+          release_sha="$(jq -r '.object.sha' <<<"$tag_data")"
           if [ "$release_sha" != "$(git rev-parse HEAD)" ]; then
-            echo 'Checked-out commit does not match the release tag.' >&2
+            echo 'Checked-out commit does not match the remote release tag.' >&2
             exit 1
           fi
           git fetch --no-tags origin main

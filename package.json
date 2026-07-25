@@ -1,6 +1,6 @@
 {
   "name": "agent-connect",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Native session continuity between Cursor, Claude Code, Codex CLI, and Pi",
   "private": true,
   "type": "module",
