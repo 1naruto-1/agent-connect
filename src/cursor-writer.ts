@@ -1,36 +1,48 @@
+// @ts-nocheck
 // Cursor 数据库写入: 仅 INSERT 全新 composerId 的行, 绝不改动已有数据
 // composerData 严格复刻 legacy (_v16 无 agentBackend) 格式的完整字段集
-import { DatabaseSync } from 'node:sqlite';
-import { execSync } from 'node:child_process';
+import { Database } from 'bun:sqlite';
 import { randomUUID, randomBytes } from 'node:crypto';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
-import { cursorDbPath } from './cursor.js';
+import { cursorDbPath, cursorWorkspaceStoragePath, normalizeCursorPath } from './cursor.ts';
 
+function processOutput(command) {
+  const result = Bun.spawnSync({ cmd: command, stdout: 'pipe', stderr: 'pipe' });
+  const decoder = new TextDecoder();
+  return { exitCode: result.exitCode, output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
+}
+
+// Writing while Cursor owns its database can corrupt a session store. Fail closed when unsure.
 export function assertCursorClosed() {
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq Cursor.exe" /NH', { encoding: 'utf8' });
-    if (out.includes('Cursor.exe')) {
-      throw new Error('Cursor 正在运行。写入其数据库前请先完全退出 Cursor (托盘图标也要退出), 然后重试。');
-    }
-  } catch (e) {
-    if (e.message.includes('Cursor 正在运行')) throw e;
-    // tasklist 不可用时跳过检测
+  if (process.platform === 'win32') {
+    const result = processOutput(['tasklist', '/FI', 'IMAGENAME eq Cursor.exe', '/NH']);
+    if (result.exitCode !== 0) throw new Error('无法确认 Cursor 是否运行，已拒绝写入其数据库。请关闭 Cursor 后重试。');
+    if (result.output.includes('Cursor.exe')) throw new Error('Cursor 正在运行。写入其数据库前请先完全退出 Cursor（包括托盘图标），然后重试。');
+    return;
+  }
+  for (const processName of ['Cursor', 'cursor']) {
+    const result = processOutput(['pgrep', '-x', processName]);
+    if (result.exitCode === 0) throw new Error('Cursor 正在运行。写入其数据库前请先完全退出 Cursor，然后重试。');
+    if (result.exitCode !== 1) throw new Error('无法确认 Cursor 是否运行，已拒绝写入其数据库。请关闭 Cursor 后重试。');
   }
 }
 
 // 在 workspaceStorage 中找项目对应的 workspaceId
 export function findWorkspaceId(cwd) {
-  const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
-  const wsRoot = path.join(appData, 'Cursor', 'User', 'workspaceStorage');
-  const target = cwd.replaceAll('\\', '/').toLowerCase();
+  const wsRoot = cursorWorkspaceStoragePath();
+  if (!fs.existsSync(wsRoot)) {
+    throw new Error(`Cursor 从未打开过项目 ${cwd}（workspaceStorage 不存在），请先在 Cursor 中打开一次该项目。`);
+  }
+  const target = normalizeCursorPath(cwd);
   for (const dir of fs.readdirSync(wsRoot)) {
     const wsFile = path.join(wsRoot, dir, 'workspace.json');
     if (!fs.existsSync(wsFile)) continue;
     try {
       const folder = JSON.parse(fs.readFileSync(wsFile, 'utf8')).folder || '';
-      const folderPath = decodeURIComponent(folder.replace('file:///', '')).replace(/^([a-z])%3a/i, '$1:').toLowerCase();
-      if (folderPath === target || folderPath === target.replace(':', '%3a')) return dir;
+      const folderPath = normalizeCursorPath(folder.startsWith('file:') ? fileURLToPath(folder) : folder);
+      if (folderPath === target) return dir;
     } catch {}
   }
   throw new Error(`Cursor 从未打开过项目 ${cwd} (workspaceStorage 中无对应 workspace), 请先在 Cursor 中打开一次该项目。`);
@@ -44,11 +56,11 @@ export function writeCursorSession(cwd, name, bubbles) {
   const now = Date.now();
   const createdAt = bubbles[0] ? Date.parse(bubbles[0].header.createdAt) : now;
   const lastUpdatedAt = bubbles.at(-1) ? Date.parse(bubbles.at(-1).header.createdAt) : now;
-  const fsPath = cwd.replace(/^([A-Z]):/, (m, d) => d.toLowerCase() + ':');
-  const external = 'file:///' + encodeURIComponent(fsPath.replaceAll('\\', '/')).replaceAll('%2F', '/').replace(/^([a-z])%3A/i, (m, d) => d + '%3A');
+  const fsPath = process.platform === 'win32' ? cwd.replace(/^([A-Z]):/, (m, d) => d.toLowerCase() + ':') : cwd;
+  const external = pathToFileURL(fsPath).toString();
   const workspaceIdentifier = {
     id: workspaceId,
-    uri: { $mid: 1, fsPath, _sep: 1, external, path: '/' + fsPath.replaceAll('\\', '/'), scheme: 'file' },
+    uri: { $mid: 1, fsPath, _sep: 1, external, path: new URL(external).pathname, scheme: 'file' },
   };
 
   // legacy 格式 composerData: 无 agentBackend, Cursor 直接从 JSON bubble 渲染
@@ -157,15 +169,15 @@ export function writeCursorSession(cwd, name, bubbles) {
     workspaceIdentifier,
   };
 
-  const db = new DatabaseSync(cursorDbPath());
+  const db = new Database(cursorDbPath());
   try {
     db.exec('BEGIN');
-    const kv = db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
+    const kv = db.query('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
     for (const b of bubbles) {
       kv.run(`bubbleId:${composerId}:${b.bubbleId}`, JSON.stringify(b.data));
     }
     kv.run(`composerData:${composerId}`, JSON.stringify(composerData));
-    db.prepare('INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, recency, checkpointAt, value) VALUES (?, ?, ?, ?, 0, 0, ?, NULL, ?)')
+    db.query('INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, recency, checkpointAt, value) VALUES (?, ?, ?, ?, 0, 0, ?, NULL, ?)')
       .run(composerId, workspaceId, createdAt, lastUpdatedAt, lastUpdatedAt, JSON.stringify(headerValue));
     db.exec('COMMIT');
   } catch (e) {
@@ -175,22 +187,4 @@ export function writeCursorSession(cwd, name, bubbles) {
     db.close();
   }
   return composerId;
-}
-
-// 删除本工具此前写入的会话 (仅删除指定 composerId 的行, 用于清理失败的实验)
-export function deleteCursorSession(composerId) {
-  assertCursorClosed();
-  const db = new DatabaseSync(cursorDbPath());
-  try {
-    db.exec('BEGIN');
-    db.prepare('DELETE FROM cursorDiskKV WHERE key LIKE ?').run(`bubbleId:${composerId}:%`);
-    db.prepare('DELETE FROM cursorDiskKV WHERE key = ?').run(`composerData:${composerId}`);
-    db.prepare('DELETE FROM composerHeaders WHERE composerId = ?').run(composerId);
-    db.exec('COMMIT');
-  } catch (e) {
-    try { db.exec('ROLLBACK'); } catch {}
-    throw e;
-  } finally {
-    db.close();
-  }
 }

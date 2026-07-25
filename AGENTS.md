@@ -2,38 +2,40 @@
 
 ## Purpose
 
-agent-connect migrates one persisted coding-agent session at a time between Cursor, Claude Code, Codex CLI, and Pi. It is a zero-runtime-dependency ESM CLI that requires Node.js 23.4 or later because Cursor integration uses `node:sqlite`.
+Agent Connect migrates one persisted coding-agent session at a time between Cursor, Claude Code, Codex CLI, and Pi. Development uses Bun 1.3.14+ and TypeScript; releases are standalone Bun binaries, so end users do not need Bun or Node.js installed.
 
 ## Architecture rules
 
-- Preserve the adapter boundary. Tool-specific parsing, storage paths, and native record shapes belong in the corresponding module under `src/adapters/` (or the dedicated Cursor helpers), never in `src/migrate.js`.
+- Preserve the adapter boundary. Tool-specific parsing, storage paths, and native record shapes belong in the corresponding module under `src/adapters/` (or the dedicated Cursor helpers), never in `src/migrate.ts`.
 - The interchange format is an ordered canonical event stream: `user`, `assistant-text`, `thinking`, `tool`, and `marker`. Preserve event order, timestamps, tool input, output, and error state whenever the source exposes them.
 - Keep tool mappings explicit. Unsupported target tools must retain their arguments and result as a readable record rather than being silently dropped.
-- Every adapter needs `id`, `label`, `available()`, `listSessions()`, `readSession()`, `writeReady()`, `writeSession()`, and target-specific `writeNotes` where needed. Register completed adapters only in `src/adapters/index.js`.
+- Every adapter needs `id`, `label`, `available()`, `listSessions()`, `readSession()`, `writeReady()`, `writeSession()`, and target-specific `writeNotes` where needed. Register completed adapters only in `src/adapters/index.ts`.
 - A migration writes a new target session; it must not modify the source session. Do not add hidden batch behavior or deduplication without documenting it in the CLI and architecture guide.
 
 ## Code style
 
-- Use native ESM, two-space indentation, semicolons, single-quoted strings, and `camelCase` identifiers. Use `UPPER_SNAKE_CASE` only for constants.
-- Use lowercase kebab-case filenames for multiword files, such as `cursor-writer.js`.
+- Use TypeScript, native ESM, two-space indentation, semicolons, single-quoted strings, and `camelCase` identifiers. Use `UPPER_SNAKE_CASE` only for constants.
+- Use lowercase kebab-case filenames for multiword files, such as `cursor-writer.ts`.
+- Keep TypeScript strict. Native Harness payloads may be opaque at adapter boundaries; do not expand existing `@ts-nocheck` compatibility islands—replace them with validated fixture-backed types as native formats are characterized.
 - Keep comments and CLI output concise. Follow the existing language of the surrounding user-facing text.
-- Do not introduce runtime dependencies unless the benefit justifies losing the current zero-dependency design.
+- Do not introduce runtime dependencies unless they improve on Bun's built-in capabilities.
 
 ## Documentation
 
 - `README.md` is the default English entry point; link its Chinese counterpart as `README.zh.md`.
 - Keep user-facing behavioral changes synchronized in both root READMEs.
-- Update `docs/architecture.md` when changing the canonical event model, an adapter contract, a storage layout, or the command flow.
+- Update `docs/architecture.md`, `docs/development-environment.md`, `docs/development.md`, or `docs/distribution.md` when their subject changes.
 - Keep generated reports and captured sessions out of documentation and Git history.
 
 ## Validation
 
-There is no build step or automated test runner yet. Before committing, run the checks relevant to the change:
+Bun 1.3.14+ is required for development. Before committing, run the checks relevant to the change:
 
 ```bash
-node bin/agent-connect.js --help
-node bin/agent-connect.js list --json
-npm pack --dry-run
+bun install --frozen-lockfile
+bun run check
+bun run src/cli.ts --help
+bun run build
 git diff --check
 ```
 
@@ -41,7 +43,7 @@ For adapter changes, use disposable session data and cover session discovery, re
 
 ## Security and generated data
 
-Native sessions can contain prompts, file contents, terminal output, tokens, and credentials. `.agent-connect/` reports and `node_modules/` are ignored; do not force-add them. Redact examples, issues, fixtures, and logs before committing.
+Native sessions can contain prompts, file contents, terminal output, tokens, and credentials. `node_modules/`, `dist/`, coverage output, centrally stored reports, and test fixtures with unredacted session content must never be committed. Redact examples, issues, fixtures, and logs before committing.
 
 ## Commits and pull requests
 

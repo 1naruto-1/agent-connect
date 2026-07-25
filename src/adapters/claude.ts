@@ -1,9 +1,10 @@
+// @ts-nocheck
 // Claude Code 适配器: ~/.claude/projects/<编码路径>/<sessionId>.jsonl
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { safeParse } from '../events.js';
+import { safeParse } from '../events.ts';
 
 export const id = 'claude';
 export const label = 'Claude Code';

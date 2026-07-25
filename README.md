@@ -1,45 +1,98 @@
-# agent-connect
+# Agent Connect
 
-**Lossless session migration between Cursor, Claude Code, Codex CLI, and Pi** — continue a conversation started in one AI coding tool inside another. No handoff documents, no summaries.
+**Continue the same coding-agent session across Harnesses.**
 
-[简体中文](README.zh.md) · [Architecture](docs/architecture.md)
+Agent Connect transfers native session history between **Cursor, Claude Code, Codex CLI, and Pi**, covering all 12 directions. It reads a source Harness's local session records and creates a new native session for the target Harness—without replaying the conversation through a model.
 
-## Why
+[简体中文](README.zh.md) · [Architecture](docs/architecture.md) · [Development](docs/development-environment.md)
 
-Context is trapped inside each AI coding tool. agent-connect converts a session **event by event** (full dialogue, thinking blocks, every tool call with its result, file edits, terminal output) and writes it into the target tool's **native session storage**, so you load it with the target tool's **own resume mechanism** and just say "continue".
+## Install
 
-## Quick start
+Agent Connect is distributed as a standalone binary. You do not need Node.js, npm, or Bun to use it.
 
-Requires Node.js >= 23.4 (uses built-in `node:sqlite`; zero dependencies).
+### Windows
 
-```bash
-git clone https://github.com/1naruto-1/agent-connect.git
-cd agent-connect && npm install -g .
-
-cd your-project
-agent-connect        # interactive: pick a session, pick a target tool, done
+```powershell
+irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.ps1 | iex
 ```
 
-Other commands:
+The installer places `agent-connect.exe` in `%USERPROFILE%\.local\bin` and adds that directory to your user `PATH` only when needed. Open a new terminal afterwards.
 
-```bash
-agent-connect list                # list all sessions of this project across tools
-agent-connect to <target> [id]    # direct migration, target ∈ cursor|claude|codex|pi
-agent-connect install             # install /resume-cursor /resume-codex /resume-pi for Claude Code
+### macOS and Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
 ```
 
-Resume the migrated session natively: `claude --resume <id>` / `codex resume <id>` / `pi --session <id>` / Cursor session history.
+The installer places the binary in `~/.local/bin/agent-connect`, adds that directory to your shell `PATH` only when needed, and verifies the downloaded binary against the GitHub Release `SHA256SUMS` file.
 
-## How it works
+Verify the installation:
 
-Hub-and-spoke: one adapter (reader + writer) per tool around a canonical event stream — 4 adapters cover all 12 directions. Tool calls are mapped across a shared vocabulary (terminal, read/write/edit, search, web, todo, ask-user, subagent, MCP). Discipline: **everything is preserved by default — no silent summarization, no silent drops**; calls with no equivalent in the target become plain-text records with full arguments and results. Every migration writes a detail report to `.agent-connect/`.
+```sh
+agent-connect --version
+agent-connect paths
+```
 
-Notes: writing into Cursor requires Cursor to be fully closed (only new rows are inserted, existing data is never touched). Verified on Windows with Cursor 3.9 / Claude Code 2.1 / Codex CLI 0.144 / Pi 0.82.
+## Continue a session
 
-## Documentation
+Run Agent Connect from the project that owns the source session:
 
-- [Architecture](docs/architecture.md): repository layout, canonical events, adapters, storage, and migration lifecycle.
+```sh
+cd /path/to/your-project
+agent-connect
+```
+
+Choose a source session and then a target Harness. The resulting session is resumed through the target's normal mechanism:
+
+| Target Harness | Resume command |
+| --- | --- |
+| Claude Code | `claude --resume <id>` or `/resume` |
+| Codex CLI | `codex resume <id>` |
+| Pi | `pi --session <id>` or `pi --resume` |
+| Cursor | Open the project and select the session from history |
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `agent-connect` | Interactively select one source session and target Harness |
+| `agent-connect list [--json]` | List sessions for the current project |
+| `agent-connect to <target> [session]` | Migrate one session directly to `cursor`, `claude`, `codex`, or `pi` |
+| `agent-connect install` | Install embedded Claude Code slash commands |
+| `agent-connect paths` | Show binary, data, and report locations |
+| `agent-connect --version` | Show the installed semantic version |
+
+After `agent-connect install`, Claude Code can use `/resume-cursor`, `/resume-codex`, and `/resume-pi`.
+
+## What is preserved
+
+Agent Connect preserves ordered user messages, assistant text, available thinking blocks, tool calls, inputs, outputs, errors, file edits, terminal results, search/web activity, todos, questions, subagents, and MCP calls.
+
+A shared canonical event stream sits between a source and target adapter. If the target Harness has no native form for a tool call, Agent Connect keeps the original arguments and result as readable text instead of silently dropping it. A migration always creates a new target session; it never changes the source session.
+
+## Data locations
+
+Agent Connect stores its own migration reports outside your project. It never creates `.agent-connect/` in a project.
+
+| Platform | Agent Connect data and reports |
+| --- | --- |
+| Windows | `%APPDATA%\agent-connect` |
+| macOS | `~/Library/Application Support/agent-connect` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/agent-connect` |
+
+Use `AGENT_CONNECT_DATA_DIR` only when you intentionally need to override this location, such as isolated development or CI. Native Cursor, Claude Code, Codex, and Pi session stores remain managed by their respective tools.
+
+## Notes
+
+- Run the command from the project whose sessions you want to list or migrate.
+- Writing to Cursor requires Cursor to be completely closed, including its tray process.
+- Codex's native reasoning format cannot be generated; imported thinking is preserved as an assistant message prefixed with `[思考过程]`.
+- Native session formats evolve. Check the centrally stored migration report before filing an issue, and remove prompts, paths, terminal output, and credentials from reports you share.
+
+## Development
+
+Contributors need Bun 1.3.14 or newer. See [Development environment](docs/development-environment.md), [Development workflow](docs/development.md), and [Distribution](docs/distribution.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)

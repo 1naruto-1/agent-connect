@@ -1,9 +1,10 @@
+// @ts-nocheck
 // Cursor 适配器: globalStorage/state.vscdb (SQLite)
 // 读取任意时可进行 (只读); 写入要求 Cursor 完全退出, 且只 INSERT 全新会话的行
 import { randomUUID } from 'node:crypto';
-import { openCursorDb, cursorDbPath, listSessions as listCursorSessions, loadSession, loadContentSnapshot, loadSubagentSession } from '../cursor.js';
-import { writeCursorSession, assertCursorClosed } from '../cursor-writer.js';
-import { safeParse } from '../events.js';
+import { openCursorDb, cursorDbPath, listSessions as listCursorSessions, loadSession, loadContentSnapshot, loadSubagentSession } from '../cursor.ts';
+import { writeCursorSession, assertCursorClosed } from '../cursor-writer.ts';
+import { safeParse } from '../events.ts';
 import fs from 'node:fs';
 
 export const id = 'cursor';

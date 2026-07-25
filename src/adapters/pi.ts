@@ -1,10 +1,11 @@
+// @ts-nocheck
 // Pi 适配器: ~/.pi/agent/sessions/--<路径编码>--/<ts>_<uuid>.jsonl
 // 恢复: pi --resume (选择器) 或 pi --session <id>
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { safeParse, canonicalToolFromName } from '../events.js';
+import { safeParse, canonicalToolFromName } from '../events.ts';
 
 export const id = 'pi';
 export const label = 'Pi';

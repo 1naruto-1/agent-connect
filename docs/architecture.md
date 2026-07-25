@@ -1,6 +1,6 @@
 # Architecture
 
-[English](../README.md) · [简体中文](../README.zh.md)
+[English](../README.md) · [简体中文](../README.zh.md) · [Development environment](development-environment.md) · [Distribution](distribution.md)
 
 ## Overview
 
@@ -19,30 +19,32 @@ canonical event stream
 target adapter: writeReady / writeSession
   │
   ├──► target native store
-  └──► .agent-connect/report-<source>-to-<target>-<id>.md
+  └──► <platform-data>/agent-connect/reports/<project-hash>/…
 ```
 
 ## Repository layout
 
 ```text
-bin/agent-connect.js       CLI entry point and command router
+src/cli.ts                 Bun CLI entry point and command router
 src/
   adapters/                One reader/writer adapter per supported tool
-  commands/                Interactive, list, direct-migration, and install commands
-  events.js                Canonical event model, statistics, and report rendering
-  migrate.js               Read → normalize → annotate → write orchestration
-  cursor.js                Cursor SQLite read helpers
-  cursor-writer.js         Cursor SQLite write helpers and legacy composer shape
-commands/                  Claude Code slash-command templates
+  commands/                Interactive, list, direct-migration, path, and install commands
+  platform/paths.ts        Standard per-platform data and executable locations
+  events.ts                Canonical event model, statistics, and report rendering
+  migrate.ts               Read → normalize → annotate → write orchestration
+  cursor.ts                Cursor SQLite read helpers using bun:sqlite
+  cursor-writer.ts         Cursor SQLite write helpers and legacy composer shape
+commands/                  Claude Code slash-command templates embedded at build time
+scripts/                   Standalone binary build and release validation
 README.md                  Default English project documentation
 README.zh.md               Simplified Chinese project documentation
-docs/                      Design and maintenance documentation
+docs/                      Architecture, development, and distribution documentation
 AGENTS.md                  Contributor and agent guidance
 ```
 
 ## Canonical event model
 
-`src/events.js` defines the loss-preserving interchange layer. Adapters produce and consume an ordered array of these event kinds:
+`src/events.ts` defines the loss-preserving interchange layer. Adapters produce and consume an ordered array of these event kinds:
 
 | Event kind | Core fields | Purpose |
 | --- | --- | --- |
@@ -68,7 +70,7 @@ Every module in `src/adapters/` exports the same operational surface:
 | `writeSession(cwd, title, events)` | Persist canonical events in the target format |
 | `writeNotes` | Target-specific notes included in the migration report |
 
-`src/adapters/index.js` is the single registry. Add an adapter there only after its reader and writer both satisfy this contract.
+`src/adapters/index.ts` is the single registry. Add an adapter there only after its reader and writer both satisfy this contract.
 
 ## Native storage integrations
 
@@ -77,41 +79,42 @@ Every module in `src/adapters/` exports the same operational surface:
 | Claude Code | `~/.claude/projects/*/*.jsonl` | Writes JSONL messages, tool-use/result pairs, and session metadata. |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Writes rollout JSONL; reuses configuration details from a recent native Codex session when available. |
 | Pi | `~/.pi/agent/sessions/--<project>--/*.jsonl` | Writes a session header plus linked message and tool-result records. |
-| Cursor | Cursor `state.vscdb` SQLite database | Reads read-only; writes only new rows after Cursor is fully closed. `cursor-writer.js` constructs the legacy composer and bubble shapes. |
+| Cursor | Cursor `state.vscdb` SQLite database | Reads through `bun:sqlite`; writes only new rows after Cursor is fully closed. `cursor-writer.ts` constructs the legacy composer and bubble shapes. |
 
 All adapters generate new target session identifiers. A migration never modifies the source session.
 
 ## Migration lifecycle
 
-`migrate(cwd, sourceId, sessionId, targetId)` in `src/migrate.js` performs the following steps:
+`migrate(cwd, sourceId, sessionId, targetId)` in `src/migrate.ts` performs the following steps:
 
 1. Resolve source and target adapters and reject identical tools.
 2. Run the target preflight check.
 3. Read the selected source session into canonical events.
 4. Add a provenance marker so the resumed agent knows the conversation was imported.
 5. Write a new target-native session.
-6. Store a human-readable report under `.agent-connect/` in the project being migrated.
+6. Store a human-readable report beneath the platform-standard Agent Connect data directory, grouped by a stable project-path hash.
 
 The public CLI currently performs **one migration per invocation**. `agent-connect list --json` can support external automation, but there is no built-in batch mode or import deduplication.
 
 ## CLI and slash commands
 
-`bin/agent-connect.js` dispatches the following command modules:
+`src/cli.ts` dispatches the following command modules:
 
 | Command | Module | Role |
 | --- | --- | --- |
-| `agent-connect` | `src/commands/interactive.js` | Pick one source session and one available target |
-| `agent-connect list [--json]` | `src/commands/list.js` | List sessions for the current project |
-| `agent-connect to <target> [id]` | `src/commands/to.js` | Directly migrate one selected session |
-| `agent-connect install` | `src/commands/install.js` | Copy Claude Code slash-command templates from `commands/` |
+| `agent-connect` | `src/commands/interactive.ts` | Pick one source session and one available target |
+| `agent-connect list [--json]` | `src/commands/list.ts` | List sessions for the current project |
+| `agent-connect to <target> [id]` | `src/commands/to.ts` | Directly migrate one selected session |
+| `agent-connect install` | `src/commands/install.ts` | Install embedded Claude Code slash-command templates |
+| `agent-connect paths` | `src/commands/paths.ts` | Show per-user binary, data, and report locations |
 
-The Markdown files under `commands/` are Claude Code command prompts that call the CLI; they are not session-format templates.
+The Markdown files under `commands/` are Claude Code command prompts embedded into standalone binaries at build time; they are not session-format templates.
 
 ## Maintenance rules
 
-- Keep native-format logic inside the relevant adapter; do not add tool-specific parsing to `migrate.js` or `events.js`.
+- Keep native-format logic inside the relevant adapter; do not add tool-specific parsing to `migrate.ts` or `events.ts`.
 - Preserve ordering, timestamps, inputs, outputs, and error status whenever a source format exposes them.
 - Document unavoidable format downgrades in the adapter's `writeNotes` and verify that the migration report explains them.
 - Treat session stores as sensitive data. Do not commit captured sessions, reports, tokens, or unredacted tool output.
 - For Cursor writes, ensure the application and tray process are completely closed; the writer must only insert new session rows.
-- Update both root READMEs and this document when adding a tool, changing the canonical event vocabulary, or changing a storage layout.
+- Update both root READMEs, this document, and the applicable development/distribution guide when adding a tool, changing the canonical event vocabulary, a storage layout, or the release process.

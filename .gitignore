@@ -1,2 +1,4 @@
 node_modules/
-.agent-connect/
+dist/
+coverage/
+*.tgz

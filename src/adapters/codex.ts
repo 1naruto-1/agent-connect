@@ -1,10 +1,11 @@
+// @ts-nocheck
 // Codex CLI 适配器: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // 恢复: codex resume <session-id>
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { safeParse, canonicalToolFromName } from '../events.js';
+import { safeParse, canonicalToolFromName } from '../events.ts';
 
 export const id = 'codex';
 export const label = 'Codex CLI';

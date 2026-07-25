@@ -4,7 +4,7 @@
 
 目前支持 **Cursor、Claude Code、Codex CLI 和 Pi**，覆盖四者之间全部 12 个迁移方向。
 
-[English](README.md) · [Architecture](docs/architecture.md)
+[English](README.md) · [Architecture](docs/architecture.md) · [开发环境](docs/development-environment.md)
 
 ## 功能
 
@@ -21,18 +21,35 @@ Agent Connect 直接读取源 Harness 的本地会话记录，将其转换成统
 - 终端命令与输出
 - 搜索、网页、待办、用户提问、子代理和 MCP 调用
 
-目标 Harness 没有对应工具格式时，Agent Connect 会把完整参数和结果保留为可读文本，而不是静默丢弃。每次迁移还会在当前项目的 `.agent-connect/` 下生成报告，方便核对处理结果。
+目标 Harness 没有对应工具格式时，Agent Connect 会把完整参数和结果保留为可读文本，而不是静默丢弃。每次迁移都会在平台标准的 Agent Connect 数据目录中生成报告，方便核对处理结果；不会在项目中创建 `.agent-connect/`。
 
 ## 快速开始
 
-> 需要 Node.js 23.4 或更高版本。项目使用 Node.js 内置的 `node:sqlite` 读取 Cursor 会话，不依赖第三方运行时包。
+Agent Connect 以独立二进制发布。使用者不需要安装 Node.js、npm 或 Bun。
 
 ### 安装
 
-```bash
-git clone https://github.com/1naruto-1/agent-connect.git
-cd agent-connect
-npm install -g .
+#### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.ps1 | iex
+```
+
+安装器将 `agent-connect.exe` 安装到 `%USERPROFILE%\.local\bin`；若该目录尚未位于用户 `PATH`，会自动追加。安装后请打开新的终端。
+
+#### macOS 与 Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
+```
+
+安装器将二进制安装到 `~/.local/bin/agent-connect`，并校验 GitHub Release 的 `SHA256SUMS`。
+
+验证安装：
+
+```sh
+agent-connect --version
+agent-connect paths
 ```
 
 ### 接续会话
@@ -53,7 +70,7 @@ agent-connect
 
 ```text
 完成: 用户消息×3, 助手正文×27, 思考块×28, 工具调用 read×2, web-search×8
-报告: /path/to/project/.agent-connect/report-cursor-to-claude-xxxxxxxx.md
+报告: %APPDATA%\agent-connect\reports\<项目哈希>\report-...md
 
 继续会话: claude --resume 0c8ccb21-...
 ```
@@ -67,6 +84,8 @@ agent-connect
 | `agent-connect list --json` | 以 JSON 格式输出会话列表 |
 | `agent-connect to <目标> [会话]` | 直接迁移一个会话，目标为 `cursor`、`claude`、`codex` 或 `pi` |
 | `agent-connect install` | 安装 Claude Code 斜杠命令 |
+| `agent-connect paths` | 显示二进制、数据和报告目录 |
+| `agent-connect --version` | 显示语义化版本号 |
 
 `agent-connect to` 的会话参数可以使用会话 ID 前缀或标题关键词；省略时，会选择最近一个来源不同于目标 Harness 的会话。
 
@@ -118,6 +137,18 @@ Agent Connect 使用中心辐射架构：每个 Harness 提供一个读取器和
 
 更完整的事件模型、适配器契约和存储说明见 [架构文档](docs/architecture.md)。
 
+## 数据存储位置
+
+Agent Connect 仅将自身生成的迁移报告存入平台标准数据目录；Cursor、Claude Code、Codex CLI 和 Pi 的原生会话仍由各自工具管理。
+
+| 平台 | Agent Connect 数据和报告目录 |
+| --- | --- |
+| Windows | `%APPDATA%\agent-connect` |
+| macOS | `~/Library/Application Support/agent-connect` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/agent-connect` |
+
+只有在 CI 或隔离开发等场景才使用 `AGENT_CONNECT_DATA_DIR` 覆盖数据目录。
+
 ## 注意事项
 
 - **只处理当前项目的会话**：请在会话所属的项目目录中运行 Agent Connect。
@@ -126,7 +157,11 @@ Agent Connect 使用中心辐射架构：每个 Harness 提供一个读取器和
 - **Codex 思考块会降级显示**：Codex 的原生 reasoning 内容采用无法直接构造的格式，因此会以带 `[思考过程]` 前缀的助手消息保留。
 - **原生格式可能随版本变化**：当前验证环境为 Windows、Cursor 3.9、Claude Code 2.1、Codex CLI 0.144 和 Pi 0.82。
 
-如果迁移结果显示异常，请查看 `.agent-connect/` 下的报告，并在提交 Issue 前移除其中的路径、提示词、终端输出和凭据等敏感信息。
+如果迁移结果显示异常，请查看平台数据目录下的报告，并在提交 Issue 前移除其中的路径、提示词、终端输出和凭据等敏感信息。
+
+## 开发
+
+协作者需要 Bun 1.3.14 或更高版本。请阅读[开发环境](docs/development-environment.md)、[开发工作流](docs/development.md)与[发行说明](docs/distribution.md)。
 
 ## License
 
