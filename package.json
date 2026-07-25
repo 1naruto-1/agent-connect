@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run typecheck && bun test",
-    "build": "bun run scripts/build.ts"
+    "build": "bun run scripts/build.ts",
+    "smoke:build": "bun run scripts/smoke-build.ts",
+    "verify:checksums": "bun run scripts/verify-checksums.ts"
   },
   "author": "L <3611291419@qq.com>",
   "keywords": [
