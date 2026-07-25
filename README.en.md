@@ -13,7 +13,7 @@ Context is trapped inside each AI coding tool. agent-connect converts a session 
 Requires Node.js >= 23.4 (uses built-in `node:sqlite`; zero dependencies).
 
 ```bash
-git clone https://github.com/<you>/agent-connect.git
+git clone https://github.com/1naruto-1/agent-connect.git
 cd agent-connect && npm install -g .
 
 cd your-project

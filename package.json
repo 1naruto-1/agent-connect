@@ -25,5 +25,13 @@
     "migration",
     "context"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1naruto-1/agent-connect.git"
+  },
+  "homepage": "https://github.com/1naruto-1/agent-connect#readme",
+  "bugs": {
+    "url": "https://github.com/1naruto-1/agent-connect/issues"
+  }
 }

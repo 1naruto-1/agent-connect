@@ -12,7 +12,7 @@
 
 ```bash
 # 安装 (需要 Node.js >= 23.4)
-git clone https://github.com/<you>/agent-connect.git
+git clone https://github.com/1naruto-1/agent-connect.git
 cd agent-connect && npm install -g .
 
 # 在你的项目目录里运行
