@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { migrate } from '../src/migrate.ts';
-import type { Adapter, AdapterId } from '../src/types.ts';
+import type { Adapter, AdapterId, CanonicalEvent, WriteSessionMeta } from '../src/types.ts';
 
 const temporaryPaths: string[] = [];
 afterEach(() => {
@@ -25,10 +25,14 @@ test('writes a migration report outside the project through an injected adapter 
   const reportFile = path.join(root, 'app-data', 'reports', 'project-key', 'report.md');
   fs.mkdirSync(project);
   const source = sourceAdapter();
+  let captured: { events: CanonicalEvent[]; meta: WriteSessionMeta | undefined } | null = null;
   const target: Adapter = {
     ...source,
     id: 'claude', label: 'Claude Code',
-    writeSession: () => ({ id: 'target-id', resumeHint: 'resume target-id' }),
+    writeSession: (_cwd, _title, events, meta) => {
+      captured = { events, meta };
+      return { id: 'target-id', resumeHint: 'resume target-id' };
+    },
     writeNotes: ['fixture note'],
   };
   const resolve = (id: AdapterId): Adapter => id === 'pi' ? source : target;
@@ -38,6 +42,14 @@ test('writes a migration report outside the project through an injected adapter 
   expect(fs.existsSync(reportFile)).toBe(true);
   expect(fs.existsSync(path.join(project, '.agent-connect'))).toBe(false);
   expect(fs.readFileSync(reportFile, 'utf8')).toContain('fixture note');
+
+  // 目标端收到的事件流以来源 marker 开头, 且 meta 标注来源
+  expect(captured).not.toBeNull();
+  const { events, meta } = captured!;
+  expect(events[0]!.kind).toBe('marker');
+  expect((events[0] as { text: string }).text).toContain('Pi');
+  expect(events[1]).toMatchObject({ kind: 'user', text: 'continue' });
+  expect(meta).toEqual({ source: 'pi' });
 });
 
 test('checks the report directory before creating a target session', () => {

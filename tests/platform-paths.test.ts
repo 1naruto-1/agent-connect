@@ -1,14 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { dataDirectory, executableDirectory, getAppPaths, normalizeProjectPath, projectKey, reportFilePath } from '../src/platform/paths.ts';
-import { isSemVer } from '../src/semver.ts';
-import { VERSION } from '../src/version.ts';
 
-test('package version uses SemVer 2.0.0', () => {
-  expect(isSemVer(VERSION)).toBe(true);
-  expect(isSemVer('1.2.3-01')).toBe(false);
-  expect(isSemVer('1.2.3-a..b')).toBe(false);
-  expect(isSemVer('01.2.3')).toBe(false);
-});
+// SemVer 用例已移至 tests/semver.test.ts
 
 describe('platform paths', () => {
   test('uses %APPDATA% and ~/.local/bin on Windows', () => {
