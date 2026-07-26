@@ -34,6 +34,15 @@ download() {
   fi
 }
 
+resolve_redirect() {
+  # Prints the redirect Location for $1, or nothing on failure. Does not consume API quota.
+  if command -v curl >/dev/null 2>&1; then
+    curl -sS --proto '=https' --tlsv1.2 --retry 3 -o /dev/null -w '%{redirect_url}' "$1" 2>/dev/null || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget --max-redirect=0 -O /dev/null -S "$1" 2>&1 | sed -n 's/^[[:space:]]*Location:[[:space:]]*//p' | head -n 1
+  fi
+}
+
 is_semver() {
   version="$1"
   printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' || return 1
@@ -82,6 +91,14 @@ main() {
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     echo 'Agent Connect installer requires curl or wget.' >&2
     exit 1
+  fi
+
+  if [ "$VERSION" = 'latest' ]; then
+    # github.com/<repo>/releases/latest redirects to /releases/tag/v<version> without API rate limits.
+    REDIRECT_URL="$(resolve_redirect "https://github.com/$REPOSITORY/releases/latest")"
+    case "$REDIRECT_URL" in
+      */releases/tag/v*) VERSION="${REDIRECT_URL##*/releases/tag/v}" ;;
+    esac
   fi
 
   if [ "$VERSION" = 'latest' ]; then

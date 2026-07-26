@@ -18,13 +18,27 @@ The installer honors `AGENT_CONNECT_BIN_DIR` for the executable destination. Age
 
 The default install commands use the installer script from `main`, but the script downloads a versioned binary from GitHub Releases:
 
-1. Query `https://api.github.com/repos/1naruto-1/agent-connect/releases/latest`.
-2. Validate and remove the `v` prefix from the returned SemVer tag.
+1. Follow the redirect from `https://github.com/1naruto-1/agent-connect/releases/latest` to `/releases/tag/v<version>`. This lookup is not subject to the GitHub API rate limit. If the redirect cannot be resolved, fall back to `https://api.github.com/repos/1naruto-1/agent-connect/releases/latest`, which is rate limited per IP for anonymous callers; both installers send `GITHUB_TOKEN` as authentication for the fallback when the variable is set.
+2. Validate and remove the `v` prefix from the resolved SemVer tag.
 3. Detect the host operating system and CPU architecture. Windows currently selects x64, including Windows-on-ARM emulation; Linux releases require glibc and reject Alpine/musl.
 4. Download the matching binary and `SHA256SUMS` from `releases/download/v<version>/`.
 5. Verify SHA-256, then atomically replace the per-user executable.
 
 A Git tag by itself is not installable: the release workflow must finish and publish the corresponding assets first. GitHub's `latest` endpoint selects the latest published stable release, not a draft or prerelease.
+
+Both installers honor terminal proxy variables. `install.sh` inherits curl/wget's native support for `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`. `install.ps1` applies `HTTPS_PROXY`, `ALL_PROXY`, or `HTTP_PROXY` (in that order, including `user:password@host` credentials) explicitly, because Windows PowerShell 5.1 only honors the system WinINET proxy on its own; `NO_PROXY` entries exempt matching hosts.
+
+## Self-update
+
+An installed binary can replace itself without the installer scripts:
+
+```sh
+agent-connect update           # update to the latest release
+agent-connect update --check   # only report whether a newer release exists
+agent-connect update 0.2.5     # install an exact version, including downgrades
+```
+
+`agent-connect update` resolves the latest release through the same redirect endpoint, downloads the binary and `SHA256SUMS` for the running platform, verifies the hash, and atomically replaces its own executable (`process.execPath`). On Windows the running executable is renamed to a `.old-<pid>` file first and stale backups are cleaned on the next update. Bun's `fetch` honors `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` natively. `AGENT_CONNECT_RELEASE_BASE_URL` overrides the release origin and `AGENT_CONNECT_UPDATE_TARGET` overrides the replaced executable; both exist for tests and unusual layouts. Development checkouts (`bun run`) refuse to self-update except for `--check`.
 
 ```powershell
 # Windows: latest stable release
@@ -40,14 +54,14 @@ For a reproducible installation, use both the tagged installer and the same expl
 
 ```powershell
 $installer = [scriptblock]::Create(
-  (irm https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.4/scripts/install.ps1)
+  (irm https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.5/scripts/install.ps1)
 )
-& $installer -Version 0.2.4
+& $installer -Version 0.2.5
 ```
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.4/scripts/install.sh |
-  AGENT_CONNECT_VERSION=0.2.4 sh
+curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.5/scripts/install.sh |
+  AGENT_CONNECT_VERSION=0.2.5 sh
 ```
 
 `SHA256SUMS` detects corruption and mismatched downloads; it is not an independent trust signature because it is published with the release assets. Verify GitHub release provenance/attestations when available, and inspect the tagged installer before executing a pipe-to-shell command.

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json' with { type: 'json' };
-import { artifactName, BUILD_TARGETS } from './release-targets.ts';
+import { artifactName, BUILD_TARGETS } from '../src/release-targets.ts';
 
 interface ChecksumEntry {
   hash: string;

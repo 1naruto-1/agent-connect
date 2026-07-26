@@ -3,6 +3,7 @@ import { interactive } from './commands/interactive.ts';
 import { list } from './commands/list.ts';
 import { paths } from './commands/paths.ts';
 import { to } from './commands/to.ts';
+import { update } from './commands/update.ts';
 import { VERSION } from './version.ts';
 
 const HELP = `agent-connect — 在 Cursor / Claude Code / Codex / Pi 之间接续原生会话
@@ -13,6 +14,7 @@ const HELP = `agent-connect — 在 Cursor / Claude Code / Codex / Pi 之间接�
   agent-connect to <目标> [会话 id]          直达迁移；目标为 cursor|claude|codex|pi
   agent-connect install                     安装 Claude Code 斜杠命令
   agent-connect paths                       显示二进制、数据和报告目录
+  agent-connect update [--check] [版本号]    自更新到最新发布（--check 仅检查）
   agent-connect --version                   显示版本
 
 说明：
@@ -29,6 +31,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     case 'to': await to(args); return 0;
     case 'install': await install(); return 0;
     case 'paths': await paths(); return 0;
+    case 'update': await update(args); return 0;
     case '--version': case '-V': case 'version': console.log(VERSION); return 0;
     case '--help': case '-h': case 'help': process.stdout.write(HELP); return 0;
     default: process.stdout.write(HELP); return 1;

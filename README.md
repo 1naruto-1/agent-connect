@@ -88,6 +88,7 @@ agent-connect
 | `agent-connect to <目标> [会话]` | 直接迁移一个会话，目标为 `cursor`、`claude`、`codex` 或 `pi` |
 | `agent-connect install` | 安装 Claude Code 斜杠命令 |
 | `agent-connect paths` | 显示二进制、数据和报告目录 |
+| `agent-connect update [--check] [版本号]` | 自更新到最新发布；`--check` 仅检查是否有新版本 |
 | `agent-connect --version` | 显示语义化版本号 |
 
 `agent-connect to` 的会话参数可以使用会话 ID 前缀或标题关键词；省略时，会选择最近一个来源不同于目标 Harness 的会话。

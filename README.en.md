@@ -62,6 +62,7 @@ Choose a source session and then a target Harness. The resulting session is resu
 | `agent-connect to <target> [session]` | Migrate one session directly to `cursor`, `claude`, `codex`, or `pi` |
 | `agent-connect install` | Install embedded Claude Code slash commands |
 | `agent-connect paths` | Show binary, data, and report locations |
+| `agent-connect update [--check] [version]` | Self-update to the latest release; `--check` only reports |
 | `agent-connect --version` | Show the installed semantic version |
 
 After `agent-connect install`, Claude Code can use `/resume-cursor`, `/resume-codex`, and `/resume-pi`.

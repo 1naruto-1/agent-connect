@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json' with { type: 'json' };
-import { artifactName, hostBuildTarget } from './release-targets.ts';
+import { artifactName, hostBuildTarget } from '../src/release-targets.ts';
 
 function run(binary: string, args: string[]): string {
   const result = Bun.spawnSync({
