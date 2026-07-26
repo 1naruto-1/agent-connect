@@ -233,6 +233,7 @@ jobs:
             dist/agent-connect-${{ github.ref_name }}-darwin-arm64
       - name: Publish complete GitHub Release
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
           RELEASE_SHA: ${{ needs.build.outputs.release_sha }}
