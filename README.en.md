@@ -24,7 +24,7 @@ The installer resolves the latest published stable GitHub Release, downloads the
 curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
 ```
 
-The installer resolves the latest published stable GitHub Release, downloads the matching operating-system and CPU artifact, places it in `~/.local/bin/agent-connect`, verifies it against the release `SHA256SUMS` file, and updates the relevant POSIX shell `PATH` configuration when needed. Start a new shell before verification; fish users should run the printed `fish_add_path` command.
+The installer resolves the latest published stable GitHub Release, downloads the matching operating-system and CPU artifact, verifies it against the release `SHA256SUMS` file, then atomically installs it as `~/.local/bin/agent-connect`, and updates the relevant POSIX shell `PATH` configuration when needed. Start a new shell before verification; fish users should run the printed `fish_add_path` command.
 
 The quick-install commands fetch the installer itself from the mutable `main` branch. For reproducible or security-sensitive installation, inspect and run the [tagged, version-pinned installer](docs/distribution.md#how-installers-resolve-a-release). `SHA256SUMS` detects corruption but is not an independent signature because it is distributed with the binaries.
 
@@ -88,8 +88,10 @@ Use `AGENT_CONNECT_DATA_DIR` only when you intentionally need to override this l
 
 - Run the command from the project whose sessions you want to list or migrate.
 - Writing to Cursor requires Cursor to be completely closed, including its tray process.
+- Every migration creates a new session; there is currently no built-in batch mode or duplicate-import detection.
 - Codex's native reasoning format cannot be generated; imported thinking is preserved as an assistant message prefixed with `[思考过程]`.
-- Native session formats evolve. Check the centrally stored migration report before filing an issue, and remove prompts, paths, terminal output, and credentials from reports you share.
+- Native session formats may change across versions. The currently validated environment is Windows with Cursor 3.9, Claude Code 2.1, Codex CLI 0.144, and Pi 0.82.
+- Check the centrally stored migration report before filing an issue, and remove prompts, paths, terminal output, and credentials from reports you share.
 
 ## Development
 

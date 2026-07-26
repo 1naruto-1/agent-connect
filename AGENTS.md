@@ -22,7 +22,7 @@ Agent Connect migrates one persisted coding-agent session at a time between Curs
 
 ## Documentation
 
-- `README.md` is the default English entry point; link its Chinese counterpart as `README.zh.md`.
+- `README.md` is the default Simplified Chinese entry point; its English counterpart is `README.en.md`. Keep both synchronized and cross-linked.
 - Keep user-facing behavioral changes synchronized in both root READMEs.
 - Update `docs/architecture.md`, `docs/development-environment.md`, `docs/development.md`, or `docs/distribution.md` when their subject changes.
 - Keep generated reports and captured sessions out of documentation and Git history.
