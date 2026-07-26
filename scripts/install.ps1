@@ -12,13 +12,108 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+function Get-ProxyArguments([string]$Uri) {
+  # Windows PowerShell 5.1 only honors the system (WinINET) proxy, so terminal-style
+  # HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY variables must be applied explicitly.
+  $TargetHost = ([Uri]$Uri).Host
+  $NoProxy = if ($env:NO_PROXY) { $env:NO_PROXY } else { '' }
+  foreach ($Entry in ($NoProxy -split '[,\s]+' | Where-Object { $_ })) {
+    $Suffix = $Entry.TrimStart('*').TrimStart('.')
+    if ($Entry -eq '*' -or $TargetHost -ieq $Suffix -or $TargetHost.EndsWith(".$Suffix", [StringComparison]::OrdinalIgnoreCase)) { return @{} }
+  }
+  $ProxyUrl = $null
+  foreach ($Name in 'HTTPS_PROXY', 'ALL_PROXY', 'HTTP_PROXY') {
+    $Value = [Environment]::GetEnvironmentVariable($Name)
+    if ($Value) { $ProxyUrl = $Value; break }
+  }
+  if (-not $ProxyUrl) { return @{} }
+  $Parsed = [Uri]$ProxyUrl
+  $Arguments = @{ Proxy = "$($Parsed.Scheme)://$($Parsed.Authority)" }
+  if ($Parsed.UserInfo) {
+    $Parts = $Parsed.UserInfo.Split(':', 2)
+    $ProxyPassword = if ($Parts.Length -gt 1) { [Uri]::UnescapeDataString($Parts[1]) } else { '' }
+    $Arguments.ProxyCredential = New-Object System.Management.Automation.PSCredential(
+      [Uri]::UnescapeDataString($Parts[0]),
+      (ConvertTo-SecureString $ProxyPassword -AsPlainText -Force))
+  }
+  return $Arguments
+}
+
+function Invoke-Download([string]$Uri, [string]$OutFile) {
+  $ProxyArguments = Get-ProxyArguments $Uri
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile @ProxyArguments
+  } catch {
+    throw "Download failed for ${Uri}: $(Get-HttpErrorMessage $_)"
+  }
+}
+
+function Get-HttpErrorMessage($ErrorRecord) {
+  $Body = $null
+  if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+    $Body = $ErrorRecord.ErrorDetails.Message
+  } elseif ($ErrorRecord.Exception.Response -is [System.Net.HttpWebResponse]) {
+    try {
+      $Reader = New-Object IO.StreamReader($ErrorRecord.Exception.Response.GetResponseStream())
+      $Body = $Reader.ReadToEnd()
+      $Reader.Dispose()
+    } catch { }
+  }
+  if ($Body) {
+    # GitHub API errors are JSON with \uXXXX escapes; surface the decoded human-readable message.
+    try {
+      $Message = (ConvertFrom-Json $Body).message
+      if ($Message) { return $Message }
+    } catch { }
+    return $Body
+  }
+  return $ErrorRecord.Exception.Message
+}
+
+function Get-LatestVersionFromRedirect([string]$Repo) {
+  # github.com/<repo>/releases/latest answers with a redirect to /releases/tag/v<version>
+  # and is not subject to the GitHub API rate limit.
+  $Uri = "https://github.com/$Repo/releases/latest"
+  $Arguments = @{ UseBasicParsing = $true; Uri = $Uri; MaximumRedirection = 0; Headers = @{ 'User-Agent' = 'agent-connect-installer' } }
+  $ProxyArguments = Get-ProxyArguments $Uri
+  $Location = $null
+  if ($PSVersionTable.PSVersion.Major -ge 6) {
+    try {
+      $Response = Invoke-WebRequest @Arguments @ProxyArguments -ErrorAction Stop
+      if ($Response -and $Response.Headers) { $Location = @($Response.Headers['Location'])[0] }
+    } catch {
+      $Response = $_.Exception.Response
+      if ($Response -and $Response.Headers -and $Response.Headers.Location) { $Location = $Response.Headers.Location.ToString() }
+    }
+  } else {
+    # Windows PowerShell returns the 3xx response alongside a non-terminating redirect error.
+    $Response = Invoke-WebRequest @Arguments @ProxyArguments -ErrorAction SilentlyContinue
+    if ($Response -and $Response.Headers) { $Location = @($Response.Headers['Location'])[0] }
+  }
+  if ($Location -and $Location -match '/releases/tag/v([^/?#]+)$') { return [Uri]::UnescapeDataString($Matches[1]) }
+  return $null
+}
+
 function Get-ReleaseVersion([string]$RequestedVersion, [string]$Repo) {
   if ($RequestedVersion -ne 'latest') {
     if ($RequestedVersion.StartsWith('v')) { return $RequestedVersion.Substring(1) }
     return $RequestedVersion
   }
-  $headers = @{ 'User-Agent' = 'agent-connect-installer'; 'Accept' = 'application/vnd.github+json' }
-  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
+  $FromRedirect = Get-LatestVersionFromRedirect $Repo
+  if ($FromRedirect) { return $FromRedirect }
+  # Fallback: the GitHub API, which is rate limited per IP for anonymous callers.
+  $ApiUri = "https://api.github.com/repos/$Repo/releases/latest"
+  $Headers = @{ 'User-Agent' = 'agent-connect-installer'; 'Accept' = 'application/vnd.github+json' }
+  if ($env:GITHUB_TOKEN) { $Headers.Authorization = "Bearer $($env:GITHUB_TOKEN)" }
+  $ProxyArguments = Get-ProxyArguments $ApiUri
+  try {
+    $release = Invoke-RestMethod -Uri $ApiUri -Headers $Headers @ProxyArguments
+  } catch {
+    $Detail = Get-HttpErrorMessage $_
+    $Hint = if ($Detail -match 'rate limit') { 'Set GITHUB_TOKEN for a higher limit, pass -Version x.y.z to skip the lookup, or retry later.' }
+            else { 'Pass -Version x.y.z to skip the lookup, or retry later.' }
+    throw "Could not resolve the latest release: $Detail $Hint"
+  }
   if (-not $release.tag_name) { throw 'GitHub did not return a latest release tag.' }
   $tag = $release.tag_name.ToString()
   if (-not $tag.StartsWith('v')) { throw "GitHub returned an invalid release tag: $tag" }
@@ -62,8 +157,8 @@ $Backup = $null
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 try {
-  Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/SHA256SUMS" -OutFile $ChecksumFile
-  Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$AssetName" -OutFile $Stage
+  Invoke-Download "$ReleaseUrl/SHA256SUMS" $ChecksumFile
+  Invoke-Download "$ReleaseUrl/$AssetName" $Stage
   $ExpectedHash = Get-ExpectedHash $ChecksumFile $AssetName
   $ActualHash = Get-Sha256 $Stage
   if ($ActualHash -ne $ExpectedHash) { throw "Checksum mismatch for $AssetName." }

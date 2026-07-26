@@ -46,12 +46,18 @@ out=''
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    -H|--proto|--retry) shift 2 ;;
+    -H|-w|--proto|--retry) shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 printf '%s\\n' "$url" >> "$FIXTURE_LOG"
+case "$url" in
+  */releases/latest)
+    printf 'https://github.com/fixture/repository/releases/tag/${FIXTURE_TAG}'
+    exit 0
+    ;;
+esac
 if [ -n "$out" ]; then
   case "$url" in
     *SHA256SUMS) cp "$FIXTURE_SUMS" "$out" ;;
@@ -93,7 +99,8 @@ esac
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect'))).toEqual(fs.readFileSync(asset));
 
     const requests = fs.readFileSync(requestLog, 'utf8');
-    expect(requests).toContain('https://api.github.com/repos/fixture/repository/releases/latest');
+    expect(requests).toContain('https://github.com/fixture/repository/releases/latest');
+    expect(requests).not.toContain('https://api.github.com/');
     expect(requests).toContain(`https://github.com/fixture/repository/releases/download/${FIXTURE_TAG}/${assetName}`);
     expect(requests).toContain(`https://github.com/fixture/repository/releases/download/${FIXTURE_TAG}/SHA256SUMS`);
 
@@ -189,6 +196,10 @@ if (process.platform === 'win32') {
       FIXTURE_SUMS: checksums,
       FIXTURE_LOG: requestLog,
       FIXTURE_SCRIPT: script,
+      HTTPS_PROXY: '',
+      HTTP_PROXY: '',
+      ALL_PROXY: '',
+      NO_PROXY: '',
     };
     const command = `
 $ErrorActionPreference = 'Stop'
@@ -196,13 +207,17 @@ $ErrorActionPreference = 'Stop'
 $env:USERPROFILE = $env:FIXTURE_HOME
 $env:AGENT_CONNECT_BIN_DIR = $env:FIXTURE_BIN
 function Invoke-RestMethod {
-  param([string]$Uri, [hashtable]$Headers)
-  [IO.File]::AppendAllText($env:FIXTURE_LOG, $Uri + [Environment]::NewLine)
-  return [pscustomobject]@{ tag_name = '${FIXTURE_TAG}' }
+  [CmdletBinding()]
+  param([string]$Uri, [hashtable]$Headers, [string]$Proxy, [pscredential]$ProxyCredential)
+  throw 'Unexpected GitHub API request'
 }
 function Invoke-WebRequest {
-  param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
-  [IO.File]::AppendAllText($env:FIXTURE_LOG, $Uri + [Environment]::NewLine)
+  [CmdletBinding()]
+  param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$MaximumRedirection, [hashtable]$Headers, [string]$Proxy, [pscredential]$ProxyCredential)
+  [IO.File]::AppendAllText($env:FIXTURE_LOG, $Uri + ' proxy=' + $Proxy + [Environment]::NewLine)
+  if ($PSBoundParameters.ContainsKey('MaximumRedirection')) {
+    return [pscustomobject]@{ StatusCode = 302; Headers = @{ Location = 'https://github.com/fixture/repository/releases/tag/${FIXTURE_TAG}' } }
+  }
   if ($Uri -match 'SHA256SUMS$') {
     Copy-Item -LiteralPath $env:FIXTURE_SUMS -Destination $OutFile
   } else {
@@ -222,7 +237,8 @@ function Invoke-WebRequest {
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect.exe'))).toEqual(fs.readFileSync(asset));
 
     const requests = fs.readFileSync(requestLog, 'utf8');
-    expect(requests).toContain('https://api.github.com/repos/fixture/repository/releases/latest');
+    expect(requests).toContain('https://github.com/fixture/repository/releases/latest');
+    expect(requests).not.toContain('https://api.github.com/');
     expect(requests).toContain(`https://github.com/fixture/repository/releases/download/${FIXTURE_TAG}/SHA256SUMS`);
     expect(requests).toContain(`https://github.com/fixture/repository/releases/download/${FIXTURE_TAG}/${assetName}`);
 
@@ -233,12 +249,13 @@ function Invoke-WebRequest {
     fs.writeFileSync(updatedChecksums, `${updatedHash} *${assetName}\n`);
     const replacement = Bun.spawnSync({
       cmd: ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
-      env: { ...env, FIXTURE_ASSET: updatedAsset, FIXTURE_SUMS: updatedChecksums },
+      env: { ...env, FIXTURE_ASSET: updatedAsset, FIXTURE_SUMS: updatedChecksums, HTTPS_PROXY: 'http://127.0.0.1:9099' },
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 30_000,
     });
     expect(replacement.exitCode, output(replacement)).toBe(0);
+    expect(fs.readFileSync(requestLog, 'utf8')).toContain('proxy=http://127.0.0.1:9099');
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect.exe'))).toEqual(fs.readFileSync(updatedAsset));
     expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
     expect(fs.readdirSync(installDirectory).filter((file) => file.includes('.old-'))).toEqual([]);
@@ -289,5 +306,31 @@ function Invoke-WebRequest { throw 'Unexpected network request' }
     });
     expect(invalid.exitCode).not.toBe(0);
     expect(output(invalid)).toContain('Invalid SemVer release');
+
+    const rateLimitedCommand = `
+$env:USERPROFILE = $env:FIXTURE_HOME
+$env:AGENT_CONNECT_BIN_DIR = $env:FIXTURE_BIN
+function Invoke-WebRequest {
+  [CmdletBinding()]
+  param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$MaximumRedirection, [hashtable]$Headers, [string]$Proxy, [pscredential]$ProxyCredential)
+  return $null
+}
+function Invoke-RestMethod {
+  [CmdletBinding()]
+  param([string]$Uri, [hashtable]$Headers, [string]$Proxy, [pscredential]$ProxyCredential)
+  throw "API rate limit exceeded for 172.237.78.51. (But here's the good news: Authenticated requests get a higher rate limit.)"
+}
+& $env:FIXTURE_SCRIPT -Repository 'fixture/repository' -SkipPathUpdate
+`;
+    const rateLimited = Bun.spawnSync({
+      cmd: ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', rateLimitedCommand],
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 10_000,
+    });
+    expect(rateLimited.exitCode).not.toBe(0);
+    expect(output(rateLimited)).toContain('Could not resolve the latest release');
+    expect(output(rateLimited)).toContain('Set GITHUB_TOKEN for a higher limit');
   }, { timeout: 120_000 });
 }
