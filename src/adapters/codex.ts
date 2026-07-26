@@ -1,17 +1,17 @@
 // Codex CLI 适配器: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // 恢复: codex resume <session-id>
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
+import { homeDirectory } from '../platform/paths.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
 export const id = 'codex';
 export const label = 'Codex CLI';
 
-const sessionsDir = () => path.join(os.homedir(), '.codex', 'sessions');
+const sessionsDir = () => path.join(homeDirectory(), '.codex', 'sessions');
 
 export function available(): boolean {
   return fs.existsSync(sessionsDir());

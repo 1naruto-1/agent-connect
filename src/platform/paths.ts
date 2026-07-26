@@ -10,6 +10,12 @@ const envOf = (options: PathOptions): NodeJS.ProcessEnv => options.env ?? proces
 const pathFor = (platformName: NodeJS.Platform): typeof path => platformName === 'win32' ? path.win32 : path.posix;
 const homeOf = (options: PathOptions): string => options.homeDir ?? os.homedir();
 
+// 会话存储的家目录: 优先环境变量 (win32 读 USERPROFILE, 其余读 HOME), 与 cursor.ts 的解析一致
+// Bun 在 POSIX 上的 os.homedir() 不读 HOME, 环境变量优先也让测试可以注入临时家目录
+export function homeDirectory(): string {
+  return (process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME) || os.homedir();
+}
+
 export function dataDirectory(options: PathOptions = {}): string {
   const platformName = platformOf(options);
   const env = envOf(options);

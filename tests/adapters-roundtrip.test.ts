@@ -1,5 +1,5 @@
 // JSONL 适配器 (claude/codex/pi) 的 list/read/write 往返测试
-// 适配器在调用时通过 os.homedir() 解析路径; 先覆盖 HOME/USERPROFILE 再动态导入
+// 适配器在调用时通过 homeDirectory() (环境变量优先) 解析路径; 先覆盖 HOME/USERPROFILE 再导入
 import { afterAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -10,9 +10,10 @@ import type { CanonicalEvent, ToolEvent } from '../src/types.ts';
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-connect-home-'));
-process.env.USERPROFILE = tempHome; // Windows 下 os.homedir() 读 USERPROFILE
+process.env.USERPROFILE = tempHome; // win32 下 homeDirectory() 读 USERPROFILE
 process.env.HOME = tempHome; // POSIX 下读 HOME
 
+const { homeDirectory } = await import('../src/platform/paths.ts');
 const claude = await import('../src/adapters/claude.ts');
 const codex = await import('../src/adapters/codex.ts');
 const pi = await import('../src/adapters/pi.ts');
@@ -46,8 +47,8 @@ const writeJsonl = (file: string, records: unknown[]): void => {
 const readJsonl = (file: string): Record<string, any>[] =>
   fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
 
-test('os.homedir() follows the USERPROFILE/HOME override', () => {
-  expect(os.homedir()).toBe(tempHome);
+test('homeDirectory() follows the USERPROFILE/HOME override', () => {
+  expect(homeDirectory()).toBe(tempHome);
 });
 
 // ---- Claude Code ----

@@ -1,11 +1,11 @@
 // Pi 适配器: ~/.pi/agent/sessions/--<路径编码>--/<ts>_<uuid>.jsonl
 // 恢复: pi --resume (选择器) 或 pi --session <id>
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
+import { homeDirectory } from '../platform/paths.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionResult } from '../types.ts';
 
 export const id = 'pi';
@@ -14,11 +14,11 @@ export const label = 'Pi';
 // pi 的目录编码: `--${cwd 去掉开头斜杠, [/\:] → -}--`
 function sessionDir(cwd: string): string {
   const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
-  return path.join(os.homedir(), '.pi', 'agent', 'sessions', safePath);
+  return path.join(homeDirectory(), '.pi', 'agent', 'sessions', safePath);
 }
 
 export function available(): boolean {
-  return fs.existsSync(path.join(os.homedir(), '.pi', 'agent'));
+  return fs.existsSync(path.join(homeDirectory(), '.pi', 'agent'));
 }
 
 const parseLines = (file: string): NativeRecord[] =>

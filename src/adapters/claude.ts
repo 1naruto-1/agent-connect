@@ -1,10 +1,10 @@
 // Claude Code 适配器: ~/.claude/projects/<编码路径>/<sessionId>.jsonl
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
+import { homeDirectory } from '../platform/paths.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionMeta, WriteSessionResult } from '../types.ts';
 
 export const id = 'claude';
@@ -15,11 +15,11 @@ export function encodeProjectDir(projectPath: string): string {
   return projectPath.replace(/[^A-Za-z0-9]/g, '-');
 }
 
-const projectsDir = () => path.join(os.homedir(), '.claude', 'projects');
+const projectsDir = () => path.join(homeDirectory(), '.claude', 'projects');
 const projectDir = (cwd: string) => path.join(projectsDir(), encodeProjectDir(cwd));
 
 export function available(): boolean {
-  return fs.existsSync(path.join(os.homedir(), '.claude'));
+  return fs.existsSync(path.join(homeDirectory(), '.claude'));
 }
 
 const parseLines = (file: string): NativeRecord[] =>
