@@ -28,7 +28,7 @@ target adapter: writeReady / writeSession
 src/cli.ts                 Bun CLI entry point and command router
 src/
   adapters/                One reader/writer adapter per supported tool
-  commands/                Interactive, list, direct-migration, path, and install commands
+  commands/                Interactive, list, direct-migration, path, install, and self-update commands
   platform/paths.ts        Standard per-platform data and executable locations
   events.ts                Canonical event model, statistics, and report rendering
   migrate.ts               Read → normalize → annotate → write orchestration
@@ -109,6 +109,7 @@ The public CLI currently performs **one migration per invocation**. `agent-conne
 | `agent-connect to <target> [id]` | `src/commands/to.ts` | Directly migrate one selected session |
 | `agent-connect install` | `src/commands/install.ts` | Install embedded Claude Code slash-command templates |
 | `agent-connect paths` | `src/commands/paths.ts` | Show per-user binary, data, and report locations |
+| `agent-connect update [--check] [version]` | `src/commands/update.ts` | Verify and atomically replace the running executable with a released build |
 
 The Markdown files under `commands/` are Claude Code command prompts embedded into standalone binaries at build time; they are not session-format templates.
 

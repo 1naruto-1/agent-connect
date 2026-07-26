@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import packageJson from '../package.json' with { type: 'json' };
 import { assertSemVer } from '../src/semver.ts';
-import { artifactName, BUILD_TARGETS, hostBuildTarget, type BuildTarget } from './release-targets.ts';
+import { artifactName, BUILD_TARGETS, hostBuildTarget, type BuildTarget } from '../src/release-targets.ts';
 
 interface BuildSelection {
   targets: BuildTarget[];
