@@ -40,14 +40,14 @@ For a reproducible installation, use both the tagged installer and the same expl
 
 ```powershell
 $installer = [scriptblock]::Create(
-  (irm https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.2/scripts/install.ps1)
+  (irm https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.3/scripts/install.ps1)
 )
-& $installer -Version 0.2.2
+& $installer -Version 0.2.3
 ```
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.2/scripts/install.sh |
-  AGENT_CONNECT_VERSION=0.2.2 sh
+curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/v0.2.3/scripts/install.sh |
+  AGENT_CONNECT_VERSION=0.2.3 sh
 ```
 
 `SHA256SUMS` detects corruption and mismatched downloads; it is not an independent trust signature because it is published with the release assets. Verify GitHub release provenance/attestations when available, and inspect the tagged installer before executing a pipe-to-shell command.
