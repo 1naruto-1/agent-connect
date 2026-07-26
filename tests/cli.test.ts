@@ -40,7 +40,8 @@ test('unknown command exits with code 1 and prints usage', () => {
 
 test('list --json returns a valid JSON array without file fields', () => {
   // 隔离的 HOME/APPDATA + 项目目录, 不读机器上的真实会话
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-connect-cli-'));
+  // realpath 消除 macOS 上 /var → /private/var 的符号链接, 子进程 cwd 会被解析而 fixture 编码不会
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-connect-cli-')));
   temporaryPaths.push(root);
   const project = path.join(root, 'project');
   fs.mkdirSync(project, { recursive: true });
