@@ -41,13 +41,21 @@ if (process.platform === 'linux' || process.platform === 'darwin') {
 
     const curl = `#!/bin/sh
 set -eu
-[ "$1" = '-fsSL' ] && shift
-url="$1"; shift
+url=''
+out=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -H|--proto|--retry) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
 printf '%s\\n' "$url" >> "$FIXTURE_LOG"
-if [ "\${1:-}" = '-o' ]; then
+if [ -n "$out" ]; then
   case "$url" in
-    *SHA256SUMS) cp "$FIXTURE_SUMS" "$2" ;;
-    *) cp "$FIXTURE_ASSET" "$2" ;;
+    *SHA256SUMS) cp "$FIXTURE_SUMS" "$out" ;;
+    *) cp "$FIXTURE_ASSET" "$out" ;;
   esac
 else
   printf '{"tag_name":"${FIXTURE_TAG}"}\\n'
@@ -128,6 +136,20 @@ esac
     });
     expect(mismatch.exitCode).not.toBe(0);
     expect(output(mismatch)).toContain('Checksum mismatch');
+    expect(fs.readFileSync(path.join(installDirectory, 'agent-connect'))).toEqual(fs.readFileSync(updatedAsset));
+    expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
+
+    const missingChecksums = path.join(root, 'missing-SHA256SUMS');
+    fs.writeFileSync(missingChecksums, `${updatedHash} *agent-connect-v${FIXTURE_VERSION}-other-target\n`);
+    const missingEntry = Bun.spawnSync({
+      cmd: ['sh', 'scripts/install.sh'],
+      env: { ...env, FIXTURE_ASSET: updatedAsset, FIXTURE_SUMS: missingChecksums },
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 30_000,
+    });
+    expect(missingEntry.exitCode).not.toBe(0);
+    expect(output(missingEntry)).toContain(`SHA256SUMS does not contain ${assetName}`);
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect'))).toEqual(fs.readFileSync(updatedAsset));
     expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
 
@@ -219,6 +241,7 @@ function Invoke-WebRequest {
     expect(replacement.exitCode, output(replacement)).toBe(0);
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect.exe'))).toEqual(fs.readFileSync(updatedAsset));
     expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
+    expect(fs.readdirSync(installDirectory).filter((file) => file.includes('.old-'))).toEqual([]);
 
     const badAsset = path.join(root, 'bad-asset.exe');
     const badChecksums = path.join(root, 'bad-SHA256SUMS');
@@ -233,6 +256,20 @@ function Invoke-WebRequest {
     });
     expect(mismatch.exitCode).not.toBe(0);
     expect(output(mismatch)).toContain('Checksum mismatch');
+    expect(fs.readFileSync(path.join(installDirectory, 'agent-connect.exe'))).toEqual(fs.readFileSync(updatedAsset));
+    expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
+
+    const missingChecksums = path.join(root, 'missing-SHA256SUMS');
+    fs.writeFileSync(missingChecksums, `${updatedHash} *agent-connect-${FIXTURE_TAG}-other-target.exe\n`);
+    const missingEntry = Bun.spawnSync({
+      cmd: ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      env: { ...env, FIXTURE_ASSET: updatedAsset, FIXTURE_SUMS: missingChecksums },
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 30_000,
+    });
+    expect(missingEntry.exitCode).not.toBe(0);
+    expect(output(missingEntry)).toContain(`SHA256SUMS does not contain ${assetName}`);
     expect(fs.readFileSync(path.join(installDirectory, 'agent-connect.exe'))).toEqual(fs.readFileSync(updatedAsset));
     expect(fs.readdirSync(installDirectory).filter((file) => file.startsWith('.agent-connect-'))).toEqual([]);
 

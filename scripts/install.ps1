@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 # Agent Connect per-user installer for Windows.
 # Usage: irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.ps1 | iex
 [CmdletBinding()]
@@ -9,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 function Get-ReleaseVersion([string]$RequestedVersion, [string]$Repo) {
   if ($RequestedVersion -ne 'latest') {
@@ -57,6 +58,7 @@ $InstallDir = if ($env:AGENT_CONNECT_BIN_DIR) { $env:AGENT_CONNECT_BIN_DIR } els
 $Destination = Join-Path $InstallDir 'agent-connect.exe'
 $Stage = Join-Path $InstallDir ".agent-connect-$Version-$([Guid]::NewGuid().ToString('N')).exe"
 $ChecksumFile = Join-Path ([IO.Path]::GetTempPath()) "agent-connect-$Version-$([Guid]::NewGuid().ToString('N'))-SHA256SUMS"
+$Backup = $null
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 try {
@@ -65,18 +67,58 @@ try {
   $ExpectedHash = Get-ExpectedHash $ChecksumFile $AssetName
   $ActualHash = Get-Sha256 $Stage
   if ($ActualHash -ne $ExpectedHash) { throw "Checksum mismatch for $AssetName." }
-  Move-Item -Force -LiteralPath $Stage -Destination $Destination
+  if (Test-Path -LiteralPath $Destination) {
+    # Renaming works even while the binary is running; deleting it in place does not.
+    $Backup = "$Destination.old-$PID"
+    try {
+      Move-Item -Force -LiteralPath $Destination -Destination $Backup
+    } catch {
+      throw "Could not replace $Destination while it is in use. Close agent-connect and retry the installer. ($_)"
+    }
+  }
+  try {
+    Move-Item -Force -LiteralPath $Stage -Destination $Destination
+  } catch {
+    if ($Backup -and (Test-Path -LiteralPath $Backup)) {
+      Move-Item -Force -LiteralPath $Backup -Destination $Destination -ErrorAction SilentlyContinue
+    }
+    throw
+  }
 } finally {
   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $Stage, $ChecksumFile
 }
+if ($Backup) {
+  # Best effort: a still-running old binary keeps its .old file until the next install.
+  Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $Backup
+}
 
-$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$PathEntries = @($UserPath -split ';' | Where-Object { $_ })
-if (-not $SkipPathUpdate -and -not ($PathEntries | Where-Object { $_.TrimEnd('\\') -ieq $InstallDir.TrimEnd('\\') })) {
-  $NewUserPath = if ($UserPath) { "$UserPath;$InstallDir" } else { $InstallDir }
-  [Environment]::SetEnvironmentVariable('Path', $NewUserPath, 'User')
-  $env:Path = "$InstallDir;$env:Path"
-  Write-Host "Added $InstallDir to the user PATH. Open a new terminal after this session."
+if (-not $SkipPathUpdate) {
+  $EnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+  if (-not $EnvironmentKey) { throw 'Could not open the HKCU\Environment registry key.' }
+  try {
+    # Read the raw value so %USERPROFILE%-style entries are not expanded and flattened on rewrite.
+    $UserPath = [string]$EnvironmentKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $PathKind = if ($EnvironmentKey.GetValueNames() -contains 'Path') { $EnvironmentKey.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+    $PathEntries = @($UserPath -split ';' | Where-Object { $_ })
+    $AlreadyOnPath = $PathEntries | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\\') -ieq $InstallDir.TrimEnd('\\') }
+    if (-not $AlreadyOnPath) {
+      $NewUserPath = if ($UserPath) { "$UserPath;$InstallDir" } else { $InstallDir }
+      $EnvironmentKey.SetValue('Path', $NewUserPath, $PathKind)
+      try {
+        # Broadcast WM_SETTINGCHANGE like [Environment]::SetEnvironmentVariable does, so open shells learn about the change.
+        $Signature = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+        $Broadcaster = Add-Type -MemberDefinition $Signature -Name 'PathBroadcast' -Namespace 'AgentConnectInstaller' -PassThru
+        [UIntPtr]$BroadcastResult = [UIntPtr]::Zero
+        [void]$Broadcaster::SendMessageTimeout([IntPtr]0xFFFF, 0x001A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$BroadcastResult)
+      } catch {
+        Write-Verbose "PATH change broadcast failed: $_"
+      }
+      $env:Path = "$InstallDir;$env:Path"
+      Write-Host "Added $InstallDir to the user PATH. Open a new terminal after this session."
+    }
+  } finally {
+    $EnvironmentKey.Dispose()
+  }
 }
 
 Write-Host "Installed Agent Connect $Version to $Destination"
