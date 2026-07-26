@@ -34,7 +34,7 @@ export function migrate(cwd: string, sourceId: AdapterId, sessionId: string, tar
   if (process.platform !== 'win32') fs.chmodSync(reportDirectory, 0o700);
   fs.accessSync(reportDirectory, fs.constants.W_OK);
 
-  const written = target.writeSession(cwd, title, [provenance, ...events]);
+  const written = target.writeSession(cwd, title, [provenance, ...events], { source: sourceId });
   const temporaryReport = `${reportFile}.tmp-${randomUUID()}`;
   try {
     fs.writeFileSync(temporaryReport, report, { encoding: 'utf8', mode: 0o600 });

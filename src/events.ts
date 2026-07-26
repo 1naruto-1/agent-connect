@@ -12,9 +12,21 @@ export function safeParse(text: unknown): NativeRecord | null {
   } catch { return null; }
 }
 
+// Codex 的 shell 调用把命令存为数组 (如 ["bash","-lc","ls"]), 统一为字符串
+export function normalizeCommand(command: unknown): string {
+  if (Array.isArray(command)) {
+    if (command.length === 3 && (command[1] === '-lc' || command[1] === '-c')) return String(command[2] ?? '');
+    return command.map(String).join(' ');
+  }
+  return command == null ? '' : String(command);
+}
+
 export function canonicalToolFromName(name: string | null | undefined, args: ToolInput = {}): CanonicalToolCall | null {
   switch (String(name || '').toLowerCase()) {
-    case 'shell': case 'bash': case 'terminal': return args.command ? { tool: 'terminal', input: { command: args.command, description: args.description } } : null;
+    case 'shell': case 'bash': case 'terminal': {
+      const command = normalizeCommand(args.command);
+      return command ? { tool: 'terminal', input: { command, description: args.description } } : null;
+    }
     case 'read': case 'read_file': return { tool: 'read', input: { path: args.path || args.file_path || '' } };
     case 'edit': return { tool: 'edit', input: { path: args.path || args.file_path || '', oldText: args.oldText ?? args.old_string ?? '', newText: args.newText ?? args.new_string ?? '' } };
     case 'write': return { tool: 'write', input: { path: args.path || args.file_path || '', content: args.content ?? '' } };

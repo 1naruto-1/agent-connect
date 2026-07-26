@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Cursor 数据库写入: 仅 INSERT 全新 composerId 的行, 绝不改动已有数据
 // composerData 严格复刻 legacy (_v16 无 agentBackend) 格式的完整字段集
 import { Database } from 'bun:sqlite';
@@ -7,15 +6,22 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { cursorDbPath, cursorWorkspaceStoragePath, normalizeCursorPath } from './cursor.ts';
+import type { NativeRecord } from './types.ts';
 
-function processOutput(command) {
+export interface CursorBubble {
+  bubbleId: string;
+  header: NativeRecord;
+  data: NativeRecord;
+}
+
+function processOutput(command: string[]): { exitCode: number; output: string } {
   const result = Bun.spawnSync({ cmd: command, stdout: 'pipe', stderr: 'pipe' });
   const decoder = new TextDecoder();
   return { exitCode: result.exitCode, output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
 }
 
 // Writing while Cursor owns its database can corrupt a session store. Fail closed when unsure.
-export function assertCursorClosed() {
+export function assertCursorClosed(): void {
   if (process.platform === 'win32') {
     const result = processOutput(['tasklist', '/FI', 'IMAGENAME eq Cursor.exe', '/NH']);
     if (result.exitCode !== 0) throw new Error('无法确认 Cursor 是否运行，已拒绝写入其数据库。请关闭 Cursor 后重试。');
@@ -30,7 +36,7 @@ export function assertCursorClosed() {
 }
 
 // 在 workspaceStorage 中找项目对应的 workspaceId
-export function findWorkspaceId(cwd) {
+export function findWorkspaceId(cwd: string): string {
   const wsRoot = cursorWorkspaceStoragePath();
   if (!fs.existsSync(wsRoot)) {
     throw new Error(`Cursor 从未打开过项目 ${cwd}（workspaceStorage 不存在），请先在 Cursor 中打开一次该项目。`);
@@ -49,18 +55,27 @@ export function findWorkspaceId(cwd) {
 }
 
 // 写入一个完整会话, 返回 composerId
-export function writeCursorSession(cwd, name, bubbles) {
+export function writeCursorSession(cwd: string, name: string, bubbles: CursorBubble[]): string {
   assertCursorClosed();
   const workspaceId = findWorkspaceId(cwd);
   const composerId = randomUUID();
   const now = Date.now();
-  const createdAt = bubbles[0] ? Date.parse(bubbles[0].header.createdAt) : now;
-  const lastUpdatedAt = bubbles.at(-1) ? Date.parse(bubbles.at(-1).header.createdAt) : now;
+  // header.createdAt 可能是 ISO 字符串或毫秒数; 解析失败时退回当前时间, 不写入 NaN
+  const toMs = (value: unknown): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const parsed = Date.parse(String(value));
+    return Number.isNaN(parsed) ? now : parsed;
+  };
+  const firstBubble = bubbles[0];
+  const lastBubble = bubbles.at(-1);
+  const createdAt = firstBubble ? toMs(firstBubble.header.createdAt) : now;
+  const lastUpdatedAt = lastBubble ? toMs(lastBubble.header.createdAt) : now;
   const fsPath = process.platform === 'win32' ? cwd.replace(/^([A-Z]):/, (m, d) => d.toLowerCase() + ':') : cwd;
   const external = pathToFileURL(fsPath).toString();
   const workspaceIdentifier = {
     id: workspaceId,
-    uri: { $mid: 1, fsPath, _sep: 1, external, path: new URL(external).pathname, scheme: 'file' },
+    // VS Code/Cursor 存储的是解码后的 URI path (含空格与非 ASCII 字符时不带百分号编码)
+    uri: { $mid: 1, fsPath, _sep: 1, external, path: decodeURIComponent(new URL(external).pathname), scheme: 'file' },
   };
 
   // legacy 格式 composerData: 无 agentBackend, Cursor 直接从 JSON bubble 渲染
@@ -171,7 +186,9 @@ export function writeCursorSession(cwd, name, bubbles) {
 
   const db = new Database(cursorDbPath());
   try {
-    db.exec('BEGIN');
+    // Cursor 可能在 assertCursorClosed 之后被重新启动; 立即取写锁并允许短暂等待, 失败即原子退出
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('BEGIN IMMEDIATE');
     const kv = db.query('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)');
     for (const b of bubbles) {
       kv.run(`bubbleId:${composerId}:${b.bubbleId}`, JSON.stringify(b.data));

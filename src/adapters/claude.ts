@@ -1,30 +1,34 @@
-// @ts-nocheck
 // Claude Code 适配器: ~/.claude/projects/<编码路径>/<sessionId>.jsonl
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse } from '../events.ts';
+import { atomicWriteFileSync } from '../platform/fs.ts';
+import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionMeta, WriteSessionResult } from '../types.ts';
 
 export const id = 'claude';
 export const label = 'Claude Code';
 const CLAUDE_VERSION = '2.1.201';
 
-export function encodeProjectDir(projectPath) {
+export function encodeProjectDir(projectPath: string): string {
   return projectPath.replace(/[^A-Za-z0-9]/g, '-');
 }
 
 const projectsDir = () => path.join(os.homedir(), '.claude', 'projects');
-const projectDir = (cwd) => path.join(projectsDir(), encodeProjectDir(cwd));
+const projectDir = (cwd: string) => path.join(projectsDir(), encodeProjectDir(cwd));
 
-export function available() {
+export function available(): boolean {
   return fs.existsSync(path.join(os.homedir(), '.claude'));
 }
 
-export function listSessions(cwd) {
+const parseLines = (file: string): NativeRecord[] =>
+  fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
+
+export function listSessions(cwd: string): SessionInfo[] {
   const dir = projectDir(cwd);
   if (!fs.existsSync(dir)) return [];
-  const sessions = [];
+  const sessions: SessionInfo[] = [];
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.jsonl')) continue;
     const file = path.join(dir, f);
@@ -49,7 +53,7 @@ export function listSessions(cwd) {
 }
 
 // Claude 工具名 → 统一词表
-function toCanonicalTool(use, output, isError) {
+function toCanonicalTool(use: NativeRecord): { tool: ToolEvent['tool']; input: ToolEvent['input'] } {
   const inp = use.input || {};
   const mcp = use.name?.match(/^mcp__(.+?)__(.+)$/);
   if (mcp) return { tool: 'mcp', input: { server: mcp[1], toolName: mcp[2], args: inp } };
@@ -62,29 +66,29 @@ function toCanonicalTool(use, output, isError) {
     case 'Glob': return { tool: 'glob', input: { pattern: inp.pattern || '', path: inp.path } };
     case 'WebSearch': return { tool: 'web-search', input: { query: inp.query || '' } };
     case 'WebFetch': return { tool: 'web-fetch', input: { url: inp.url || '' } };
-    case 'TodoWrite': return { tool: 'todo', input: { todos: (inp.todos || []).map((t) => ({ content: t.content, status: t.status })) } };
+    case 'TodoWrite': return { tool: 'todo', input: { todos: (inp.todos || []).map((t: NativeRecord) => ({ content: t.content, status: t.status })) } };
     case 'TaskCreate': return { tool: 'todo', input: { todos: [{ content: inp.subject || '', status: 'pending' }] } };
     case 'AskUserQuestion': return {
       tool: 'ask-user',
-      input: { questions: (inp.questions || []).map((q) => ({ question: q.question || '', options: (q.options || []).map((o) => o.label) })) },
+      input: { questions: (inp.questions || []).map((q: NativeRecord) => ({ question: q.question || '', options: (q.options || []).map((o: NativeRecord) => o.label) })) },
     };
     case 'Task': case 'Agent': return { tool: 'subagent', input: { prompt: inp.prompt || inp.description || '' } };
     default: return { tool: 'other', input: { name: use.name || 'unknown', args: inp } };
   }
 }
 
-function resultText(content) {
+function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((b) => b.text || '').join('\n');
   return content == null ? '' : JSON.stringify(content);
 }
 
-export function readSession(cwd, sessionId) {
+export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   const file = path.join(projectDir(cwd), `${sessionId}.jsonl`);
   if (!fs.existsSync(file)) throw new Error(`未找到 Claude Code 会话: ${file}`);
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter(Boolean);
+  const lines = parseLines(file);
 
-  const results = new Map();
+  const results = new Map<string, NativeRecord>();
   for (const l of lines) {
     if (l.type !== 'user' || !Array.isArray(l.message?.content)) continue;
     for (const b of l.message.content) {
@@ -92,8 +96,8 @@ export function readSession(cwd, sessionId) {
     }
   }
 
-  const events = [];
-  const skipped = {};
+  const events: CanonicalEvent[] = [];
+  const skipped: Record<string, number> = {};
   let title = '';
   for (const l of lines) {
     const ts = l.timestamp || new Date().toISOString();
@@ -128,7 +132,7 @@ export function readSession(cwd, sessionId) {
 // ---- 写入 ----
 
 // 统一词表 → Claude 工具名与输入
-function fromCanonicalTool(e) {
+function fromCanonicalTool(e: ToolEvent): { name: string; input: NativeRecord } {
   const i = e.input;
   switch (e.tool) {
     case 'terminal': return { name: 'Bash', input: { command: i.command, description: i.description } };
@@ -139,10 +143,11 @@ function fromCanonicalTool(e) {
     case 'glob': return { name: 'Glob', input: { pattern: i.pattern, path: i.path } };
     case 'web-search': return { name: 'WebSearch', input: { query: i.query } };
     case 'web-fetch': return { name: 'WebFetch', input: { url: i.url, prompt: '获取页面内容' } };
-    case 'todo': return { name: 'TodoWrite', input: { todos: i.todos.map((t) => ({ content: t.content, status: t.status, activeForm: t.content })) } };
+    case 'todo': return { name: 'TodoWrite', input: { todos: (i.todos || []).map((t: NativeRecord) => ({ content: t.content, status: t.status, activeForm: t.content })) } };
     case 'ask-user': return {
       name: 'AskUserQuestion',
-      input: { questions: i.questions.map((q) => ({ question: q.question, header: q.question.slice(0, 12), options: q.options.map((o) => ({ label: o, description: '' })), multiSelect: false })) },
+      // 经 canonicalToolFromName 透传的源记录可能缺 question/options 字段
+      input: { questions: (i.questions || []).map((q: NativeRecord) => ({ question: q.question || '', header: String(q.question || '').slice(0, 12), options: (q.options || []).map((o: unknown) => ({ label: o, description: '' })), multiSelect: false })) },
     };
     case 'subagent': return { name: 'Task', input: { description: '子代理任务', prompt: i.prompt } };
     case 'mcp': return { name: `mcp__${i.server}__${i.toolName}`.replace(/[^a-zA-Z0-9_]/g, '_'), input: i.args };
@@ -150,28 +155,28 @@ function fromCanonicalTool(e) {
   }
 }
 
-export function writeReady() {
+export function writeReady(): string | null {
   return null;
 }
 
-export function writeSession(cwd, title, events, meta = {}) {
+export function writeSession(cwd: string, title: string, events: CanonicalEvent[], meta: WriteSessionMeta = {}): WriteSessionResult {
   const sessionId = randomUUID();
   const model = meta.sourceModel ? `${meta.source || 'import'}/${meta.sourceModel}` : 'agent-connect/import';
-  const lines = [];
-  let lastUuid = null;
+  const lines: NativeRecord[] = [];
+  let lastUuid: string | null = null;
   let lastUserText = '';
 
-  const env = (uuid, ts) => ({
+  const env = (uuid: string, ts: string) => ({
     parentUuid: lastUuid, isSidechain: false, uuid, timestamp: ts,
     userType: 'external', entrypoint: 'cli', cwd, sessionId, version: CLAUDE_VERSION, gitBranch: '',
   });
-  const emitUser = (content, ts, extra = {}) => {
+  const emitUser = (content: unknown, ts: string, extra: NativeRecord = {}) => {
     const uuid = randomUUID();
     lines.push({ ...env(uuid, ts), type: 'user', promptId: randomUUID(), message: { role: 'user', content }, origin: { kind: 'human' }, promptSource: 'typed', permissionMode: 'default', ...extra });
     lastUuid = uuid;
     return uuid;
   };
-  const emitAssistant = (blocks, ts, stopReason) => {
+  const emitAssistant = (blocks: NativeRecord[], ts: string, stopReason: string | null) => {
     const uuid = randomUUID();
     lines.push({
       ...env(uuid, ts), type: 'assistant',
@@ -224,7 +229,7 @@ export function writeSession(cwd, title, events, meta = {}) {
 
   const dir = projectDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  atomicWriteFileSync(path.join(dir, `${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return {
     id: sessionId,
     resumeHint: `claude --resume ${sessionId}  (或在 Claude Code 中 /resume 选择《${title}》)`,

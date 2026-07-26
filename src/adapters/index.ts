@@ -4,11 +4,12 @@ import * as cursorModule from './cursor.ts';
 import * as piModule from './pi.ts';
 import type { Adapter, AdapterId, ListedSession } from '../types.ts';
 
+// 各模块已按 Adapter 接口类型化, 结构不匹配会在此处编译报错
 export const adapters: Record<AdapterId, Adapter> = {
-  cursor: cursorModule as unknown as Adapter,
-  claude: claudeModule as unknown as Adapter,
-  codex: codexModule as unknown as Adapter,
-  pi: piModule as unknown as Adapter,
+  cursor: cursorModule,
+  claude: claudeModule,
+  codex: codexModule,
+  pi: piModule,
 };
 
 export function isAdapterId(value: string): value is AdapterId {

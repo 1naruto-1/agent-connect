@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Pi 适配器: ~/.pi/agent/sessions/--<路径编码>--/<ts>_<uuid>.jsonl
 // 恢复: pi --resume (选择器) 或 pi --session <id>
 import path from 'node:path';
@@ -6,35 +5,40 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
+import { atomicWriteFileSync } from '../platform/fs.ts';
+import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionResult } from '../types.ts';
 
 export const id = 'pi';
 export const label = 'Pi';
 
 // pi 的目录编码: `--${cwd 去掉开头斜杠, [/\:] → -}--`
-function sessionDir(cwd) {
+function sessionDir(cwd: string): string {
   const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
   return path.join(os.homedir(), '.pi', 'agent', 'sessions', safePath);
 }
 
-export function available() {
+export function available(): boolean {
   return fs.existsSync(path.join(os.homedir(), '.pi', 'agent'));
 }
 
-export function listSessions(cwd) {
+const parseLines = (file: string): NativeRecord[] =>
+  fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
+
+export function listSessions(cwd: string): SessionInfo[] {
   const dir = sessionDir(cwd);
   if (!fs.existsSync(dir)) return [];
-  const sessions = [];
+  const sessions: SessionInfo[] = [];
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.jsonl')) continue;
     const file = path.join(dir, f);
-    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter(Boolean);
+    const lines = parseLines(file);
     const header = lines.find((l) => l.type === 'session');
     if (!header) continue;
     let title = lines.filter((l) => l.type === 'session_info' && l.name).at(-1)?.name || '';
     if (!title) {
       const firstUser = lines.find((l) => l.type === 'message' && l.message?.role === 'user');
       const c = firstUser?.message?.content;
-      title = (typeof c === 'string' ? c : c?.filter((b) => b.type === 'text').map((b) => b.text).join(' ') || '').replace(/\s+/g, ' ').slice(0, 60);
+      title = (typeof c === 'string' ? c : c?.filter((b: NativeRecord) => b.type === 'text').map((b: NativeRecord) => b.text).join(' ') || '').replace(/\s+/g, ' ').slice(0, 60);
     }
     sessions.push({ id: header.id, title: title || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, count: lines.length, file });
   }
@@ -42,7 +46,7 @@ export function listSessions(cwd) {
 }
 
 // pi 工具名 → 统一词表
-function toCanonicalTool(call, output, isError) {
+function toCanonicalTool(call: NativeRecord): { tool: ToolEvent['tool']; input: ToolEvent['input'] } {
   const a = call.arguments || {};
   switch (call.name) {
     case 'bash': return { tool: 'terminal', input: { command: a.command || '' } };
@@ -56,23 +60,30 @@ function toCanonicalTool(call, output, isError) {
   }
 }
 
-const blockText = (content) =>
-  typeof content === 'string' ? content : (content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+const blockText = (content: unknown): string =>
+  typeof content === 'string' ? content : ((content as NativeRecord[]) || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
-export function readSession(cwd, sessionId) {
+export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   const dir = sessionDir(cwd);
-  const file = fs.readdirSync(dir).map((f) => path.join(dir, f)).find((f) => f.includes(sessionId));
+  if (!fs.existsSync(dir)) throw new Error(`未找到 Pi 会话: ${sessionId}`);
+  // 文件名为 <ts>_<uuid>.jsonl, 只匹配 uuid 段 (锚定开头), 避免部分 id 命中时间戳
+  const wanted = String(sessionId).toLowerCase();
+  const file = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(dir, f)).find((f) => {
+    const base = path.basename(f, '.jsonl');
+    const idPart = base.slice(base.indexOf('_') + 1);
+    return idPart.toLowerCase().startsWith(wanted);
+  });
   if (!file) throw new Error(`未找到 Pi 会话: ${sessionId}`);
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter(Boolean);
+  const lines = parseLines(file);
 
   // toolResult 按 toolCallId 索引
-  const results = new Map();
+  const results = new Map<string, NativeRecord>();
   for (const l of lines) {
     if (l.type === 'message' && l.message?.role === 'toolResult') results.set(l.message.toolCallId, l.message);
   }
 
-  const events = [];
-  const skipped = {};
+  const events: CanonicalEvent[] = [];
+  const skipped: Record<string, number> = {};
   let title = '';
   for (const l of lines) {
     const ts = l.timestamp || new Date().toISOString();
@@ -112,7 +123,7 @@ export function readSession(cwd, sessionId) {
 // ---- 写入 ----
 
 // 统一词表 → pi 工具调用
-function toPiTool(e) {
+function toPiTool(e: ToolEvent): { name: string; arguments: NativeRecord } {
   const i = e.input;
   switch (e.tool) {
     case 'terminal': return { name: 'bash', arguments: { command: i.command } };
@@ -131,23 +142,23 @@ function toPiTool(e) {
   }
 }
 
-function uuidV7(ms = Date.now()) {
+function uuidV7(ms = Date.now()): string {
   const hex = ms.toString(16).padStart(12, '0');
   const rand = randomUUID().replaceAll('-', '');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7${rand.slice(0, 3)}-${((parseInt(rand.slice(3, 4), 16) & 0x3) | 0x8).toString(16)}${rand.slice(4, 7)}-${rand.slice(7, 19)}`;
 }
 
-export function writeReady() {
+export function writeReady(): string | null {
   return null;
 }
 
-export function writeSession(cwd, title, events) {
+export function writeSession(cwd: string, title: string, events: CanonicalEvent[]): WriteSessionResult {
   const now = new Date();
   const sessionId = uuidV7(now.getTime());
   const iso = now.toISOString();
-  const lines = [];
-  let lastId = null;
-  const entry = (obj, ts) => {
+  const lines: NativeRecord[] = [];
+  let lastId: string | null = null;
+  const entry = (obj: NativeRecord, ts: string) => {
     const id = randomUUID().slice(0, 8);
     lines.push({ ...obj, id, parentId: lastId, timestamp: ts });
     lastId = id;
@@ -157,7 +168,7 @@ export function writeSession(cwd, title, events) {
   entry({ type: 'session_info', name: title }, iso);
 
   const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-  const assistant = (content, ts, stopReason = 'stop') => entry({
+  const assistant = (content: NativeRecord[], ts: string, stopReason = 'stop') => entry({
     type: 'message',
     message: { role: 'assistant', content, api: 'anthropic-messages', provider: 'agent-connect', model: 'imported', usage: zeroUsage, stopReason, timestamp: Date.parse(ts) || Date.now() },
   }, ts);
@@ -192,7 +203,7 @@ export function writeSession(cwd, title, events) {
   const dir = sessionDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const fileTs = iso.replace(/[:.]/g, '-');
-  fs.writeFileSync(path.join(dir, `${fileTs}_${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  atomicWriteFileSync(path.join(dir, `${fileTs}_${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return { id: sessionId, resumeHint: `pi --session ${sessionId}  (或 pi --resume 选择《${title}》)` };
 }
 
