@@ -1,6 +1,6 @@
 # Architecture
 
-[English](../README.md) · [简体中文](../README.zh.md) · [Development environment](development-environment.md) · [Distribution](distribution.md)
+[English](../README.en.md) · [简体中文](../README.md) · [Development environment](development-environment.md) · [Distribution](distribution.md)
 
 ## Overview
 
@@ -36,8 +36,8 @@ src/
   cursor-writer.ts         Cursor SQLite write helpers and legacy composer shape
 commands/                  Claude Code slash-command templates embedded at build time
 scripts/                   Standalone binary build and release validation
-README.md                  Default English project documentation
-README.zh.md               Simplified Chinese project documentation
+README.md                  Simplified Chinese project documentation (default)
+README.en.md               English project documentation
 docs/                      Architecture, development, and distribution documentation
 AGENTS.md                  Contributor and agent guidance
 ```

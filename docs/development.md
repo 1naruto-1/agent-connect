@@ -53,6 +53,8 @@ Session stores may include prompts, terminal output, source code, credentials, a
 
 ## Testing expectations
 
+The table below lists minimum verification requirements for changes touching each area; it does not describe the current test suite.
+
 | Area | Minimum verification |
 | --- | --- |
 | Canonical events | Unit tests for mappings, counts, and report rendering |

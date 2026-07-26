@@ -43,7 +43,7 @@ irm https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/insta
 curl -fsSL https://raw.githubusercontent.com/1naruto-1/agent-connect/main/scripts/install.sh | sh
 ```
 
-安装器会解析最新发布的稳定版 GitHub Release，按照当前操作系统和 CPU 架构下载二进制，将其安装到 `~/.local/bin/agent-connect`，并校验该 Release 的 `SHA256SUMS`；必要时会将安装目录写入 POSIX Shell 的 `PATH` 配置。验证前请打开新 Shell；fish 用户需要执行安装器输出的 `fish_add_path` 命令。
+安装器会解析最新发布的稳定版 GitHub Release，按照当前操作系统和 CPU 架构下载二进制，先按照该 Release 的 `SHA256SUMS` 校验，再原子地安装到 `~/.local/bin/agent-connect`；必要时会将安装目录写入 POSIX Shell 的 `PATH` 配置。验证前请打开新 Shell；fish 用户需要执行安装器输出的 `fish_add_path` 命令。
 
 上述快速安装命令会从可变的 `main` 分支获取安装器本身。需要可复现或更严格的安全验证时，请检查并使用[带 Tag 且固定版本的安装方式](docs/distribution.md#how-installers-resolve-a-release)。`SHA256SUMS` 可以发现损坏，但它与二进制一同发布，并不是独立签名。
 
