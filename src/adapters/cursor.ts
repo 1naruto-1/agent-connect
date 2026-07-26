@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Cursor 适配器: globalStorage/state.vscdb (SQLite)
 // 读取任意时可进行 (只读); 写入要求 Cursor 完全退出, 且只 INSERT 全新会话的行
 import { randomUUID } from 'node:crypto';
@@ -6,20 +5,23 @@ import { openCursorDb, cursorDbPath, listSessions as listCursorSessions, loadSes
 import { writeCursorSession, assertCursorClosed } from '../cursor-writer.ts';
 import { safeParse } from '../events.ts';
 import fs from 'node:fs';
+import type { Database } from 'bun:sqlite';
+import type { CursorBubble } from '../cursor-writer.ts';
+import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionResult } from '../types.ts';
 
 export const id = 'cursor';
 export const label = 'Cursor';
 
-export function available() {
+export function available(): boolean {
   return fs.existsSync(cursorDbPath());
 }
 
-let _db;
-function db() {
+let _db: Database | undefined;
+function db(): Database {
   return (_db ??= openCursorDb());
 }
 
-export function listSessions(cwd) {
+export function listSessions(cwd: string): SessionInfo[] {
   try {
     return listCursorSessions(db(), cwd).map((s) => ({
       id: s.composerId,
@@ -27,19 +29,21 @@ export function listSessions(cwd) {
       updatedAt: s.lastUpdatedAt || s.createdAt || 0,
       count: undefined,
     }));
-  } catch {
+  } catch (e) {
+    // 数据库被锁/损坏或 schema 变化时不静默返回空列表, 至少把原因写到 stderr
+    console.error(`[agent-connect] 读取 Cursor 会话列表失败: ${e instanceof Error ? e.message : String(e)}`);
     return [];
   }
 }
 
 // ---- 读取: bubble 流 → 统一事件流 ----
 
-function toolEvent(tf, ts, dbh) {
+function toolEvent(tf: NativeRecord, ts: string, dbh: Database): CanonicalEvent {
   const args = safeParse(tf.rawArgs) || safeParse(tf.params) || {};
   const params = safeParse(tf.params) || {};
   const result = safeParse(tf.result);
   const incomplete = tf.status !== 'completed';
-  const ev = (tool, input, output, isError = false) => ({
+  const ev = (tool: ToolEvent['tool'], input: ToolEvent['input'], output: string, isError = false): ToolEvent => ({
     kind: 'tool', ts, tool, input,
     output: incomplete ? `[该调用在 Cursor 中未完成 (status=${tf.status})]${output ? '\n' + output : ''}` : output,
     isError: incomplete || isError, origName: tf.name,
@@ -49,7 +53,7 @@ function toolEvent(tf, ts, dbh) {
     const server = args.providerIdentifier || tf.name.replace(/^mcp-/, '').split('-')[0];
     const toolName = args.toolName || tf.name;
     const inner = safeParse(result?.result);
-    const text = inner?.content?.map((c) => c.text || '').join('\n') ?? (result ? JSON.stringify(result) : '');
+    const text = inner?.content?.map((c: NativeRecord) => c.text || '').join('\n') ?? (result ? JSON.stringify(result) : '');
     return ev('mcp', { server, toolName, args: args.args || args }, text);
   }
   switch (tf.name) {
@@ -63,7 +67,7 @@ function toolEvent(tf, ts, dbh) {
       return ev('read', { path: args.path || params.targetFile || '' }, result?.contents ?? '');
     case 'edit_file_v2': {
       const filePath = params.relativeWorkspacePath || '';
-      const diffLines = tf.additionalData?.precomputedDiff?.lines;
+      const diffLines: NativeRecord[] | undefined = tf.additionalData?.precomputedDiff?.lines;
       if (Array.isArray(diffLines) && diffLines.length > 0) {
         if (diffLines.every((l) => l.type === 'added')) {
           return ev('write', { path: filePath, content: diffLines.map((l) => l.content).join('\n') }, `File created: ${filePath}`);
@@ -78,8 +82,11 @@ function toolEvent(tf, ts, dbh) {
       if (content != null) return ev('write', { path: filePath, content }, `File written: ${filePath}`);
       return ev('edit', { path: filePath, oldText: '', newText: '' }, '[Cursor 未记录此次编辑的 diff 与快照]', true);
     }
-    case 'delete_file':
-      return ev('terminal', { command: `rm '${args.path || args.targetFile || params.targetFile || ''}'`, description: '删除文件' }, '');
+    case 'delete_file': {
+      const deleted = String(args.path || args.targetFile || params.targetFile || '');
+      // POSIX 单引号转义, 防止含引号的文件名产生残缺/可注入的命令文本
+      return ev('terminal', { command: `rm '${deleted.replaceAll("'", `'\\''`)}'`, description: '删除文件' }, '');
+    }
     case 'ripgrep_raw_search':
       return ev('grep', { pattern: args.pattern || args.query || args.searchTerm || '', path: args.path || args.targetDirectory }, result ? JSON.stringify(result, null, 1) : '');
     case 'glob_file_search':
@@ -89,12 +96,12 @@ function toolEvent(tf, ts, dbh) {
     case 'web_fetch':
       return ev('web-fetch', { url: args.url || '' }, result?.markdown ?? (result ? JSON.stringify(result) : ''));
     case 'todo_write':
-      return ev('todo', { todos: (result?.finalTodos || []).map((t) => ({ content: t.content, status: t.status })) }, 'Todos updated.');
+      return ev('todo', { todos: (result?.finalTodos || []).map((t: NativeRecord) => ({ content: t.content, status: t.status })) }, 'Todos updated.');
     case 'ask_question': {
-      const questions = (params.questions || []).map((q) => ({ question: q.prompt || '', options: (q.options || []).map((o) => o.label) }));
-      const answers = (result?.answers || []).map((a) => {
-        const q = (params.questions || []).find((x) => x.id === a.questionId);
-        const labels = (a.selectedOptionIds || []).map((oid) => q?.options?.find((o) => o.id === oid)?.label || oid);
+      const questions = (params.questions || []).map((q: NativeRecord) => ({ question: q.prompt || '', options: (q.options || []).map((o: NativeRecord) => o.label) }));
+      const answers = (result?.answers || []).map((a: NativeRecord) => {
+        const q = (params.questions || []).find((x: NativeRecord) => x.id === a.questionId);
+        const labels = (a.selectedOptionIds || []).map((oid: string) => q?.options?.find((o: NativeRecord) => o.id === oid)?.label || oid);
         return labels.join('; ') + (a.freeformText ? ` (补充: ${a.freeformText})` : '');
       });
       return ev('ask-user', { questions }, `用户选择: ${answers.join(' | ')}`);
@@ -105,7 +112,7 @@ function toolEvent(tf, ts, dbh) {
       if (sub) {
         for (let i = sub.bubbles.length - 1; i >= 0; i--) {
           const b = sub.bubbles[i];
-          if (b.header.type === 2 && b.bubble?.text && !b.bubble.toolFormerData) { text = b.bubble.text; break; }
+          if (b && b.header.type === 2 && b.bubble?.text && !b.bubble.toolFormerData) { text = b.bubble.text; break; }
         }
       }
       return ev('subagent', { prompt: args.prompt || args.description || JSON.stringify(args) }, text);
@@ -117,14 +124,16 @@ function toolEvent(tf, ts, dbh) {
   }
 }
 
-export function readSession(cwd, composerId) {
+export function readSession(cwd: string, composerId: string): ReadSessionResult {
   const dbh = db();
   const session = loadSession(dbh, composerId);
-  const events = [];
-  const skipped = {};
+  const events: CanonicalEvent[] = [];
+  const skipped: Record<string, number> = {};
   let lastTs = new Date(session.composer.createdAt || Date.now()).toISOString();
   for (const { header, bubble } of session.bubbles) {
-    const ts = bubble?.createdAt || lastTs;
+    // bubble.createdAt 可能是 ISO 字符串或毫秒数, 统一为 ISO 字符串
+    const rawTs = bubble?.createdAt;
+    const ts = typeof rawTs === 'number' ? new Date(rawTs).toISOString() : (rawTs || lastTs);
     lastTs = ts;
     if (!bubble) { skipped['记录缺失'] = (skipped['记录缺失'] || 0) + 1; continue; }
     const cap = header.grouping?.capabilityType;
@@ -150,7 +159,7 @@ export function readSession(cwd, composerId) {
 
 // ---- 写入: 统一事件流 → bubble 流 (legacy 完整字段模板在 cursor-writer 中) ----
 
-function baseBubble(type, bubbleId, ts) {
+function baseBubble(type: number, bubbleId: string, ts: string): NativeRecord {
   return {
     _v: 3, type,
     approximateLintErrors: [], lints: [], codebaseContextChunks: [], commits: [], pullRequests: [],
@@ -178,10 +187,18 @@ function baseBubble(type, bubbleId, ts) {
   };
 }
 
+interface CursorToolTemplate {
+  name: string;
+  tool: number;
+  args: NativeRecord;
+  result: NativeRecord;
+  additionalData?: NativeRecord;
+}
+
 // 统一词表 → Cursor toolFormerData
-function toCursorTool(e) {
+function toCursorTool(e: ToolEvent): CursorToolTemplate | null {
   const i = e.input;
-  const diffFromEdit = (oldText, newText) => ({
+  const diffFromEdit = (oldText: unknown, newText: unknown) => ({
     precomputedDiff: {
       lines: [
         ...String(oldText ?? '').split('\n').map((c) => ({ type: 'removed', content: c })),
@@ -199,10 +216,10 @@ function toCursorTool(e) {
     case 'glob': return { name: 'glob_file_search', tool: 42, args: { globPattern: i.pattern, targetDirectory: i.path }, result: { raw: e.output } };
     case 'web-search': return { name: 'web_search', tool: 18, args: { searchTerm: i.query }, result: { references: [{ title: '', url: '', chunk: e.output }] } };
     case 'web-fetch': return { name: 'web_fetch', tool: 57, args: { url: i.url }, result: { url: i.url, markdown: e.output } };
-    case 'todo': return { name: 'todo_write', tool: 35, args: { merge: true }, result: { success: true, finalTodos: (i.todos || []).map((t, idx) => ({ content: t.content, status: t.status, id: `todo-${idx}` })) } };
+    case 'todo': return { name: 'todo_write', tool: 35, args: { merge: true }, result: { success: true, finalTodos: (i.todos || []).map((t: NativeRecord, idx: number) => ({ content: t.content, status: t.status, id: `todo-${idx}` })) } };
     case 'ask-user': return {
       name: 'ask_question', tool: 51,
-      args: { title: '', questions: (i.questions || []).map((q, qi) => ({ id: `q${qi}`, prompt: q.question, options: (q.options || []).map((o, oi) => ({ id: `o${oi}`, label: o })) })) },
+      args: { title: '', questions: (i.questions || []).map((q: NativeRecord, qi: number) => ({ id: `q${qi}`, prompt: q.question, options: (q.options || []).map((o: unknown, oi: number) => ({ id: `o${oi}`, label: o })) })) },
       result: { answers: [{ questionId: 'q0', selectedOptionIds: [], freeformText: e.output }] },
     };
     case 'mcp': return {
@@ -214,18 +231,18 @@ function toCursorTool(e) {
   }
 }
 
-export function writeReady() {
+export function writeReady(): string | null {
   try {
     assertCursorClosed();
     return null;
   } catch (e) {
-    return e.message;
+    return e instanceof Error ? e.message : String(e);
   }
 }
 
-export function writeSession(cwd, title, events) {
-  const bubbles = [];
-  const push = (type, extra, grouping, ts) => {
+export function writeSession(cwd: string, title: string, events: CanonicalEvent[]): WriteSessionResult {
+  const bubbles: CursorBubble[] = [];
+  const push = (type: number, extra: NativeRecord, grouping: NativeRecord, ts: string) => {
     const bubbleId = randomUUID();
     bubbles.push({
       bubbleId,

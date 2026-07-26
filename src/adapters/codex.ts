@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Codex CLI 适配器: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // 恢复: codex resume <session-id>
 import path from 'node:path';
@@ -6,20 +5,22 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
+import { atomicWriteFileSync } from '../platform/fs.ts';
+import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
 export const id = 'codex';
 export const label = 'Codex CLI';
 
 const sessionsDir = () => path.join(os.homedir(), '.codex', 'sessions');
 
-export function available() {
+export function available(): boolean {
   return fs.existsSync(sessionsDir());
 }
 
-function allSessionFiles() {
+function allSessionFiles(): string[] {
   const root = sessionsDir();
-  const files = [];
-  const walk = (dir) => {
+  const files: string[] = [];
+  const walk = (dir: string) => {
     for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, f.name);
       if (f.isDirectory()) walk(p);
@@ -30,23 +31,37 @@ function allSessionFiles() {
   return files;
 }
 
-function readMeta(file) {
-  // 首行是 session_meta (内嵌完整系统提示词, 可达数十 KB)
+function readMeta(file: string): NativeRecord | null {
+  // 首行是 session_meta (内嵌完整系统提示词, 可达数十 KB 且在增长); 按块读到首个换行为止, 不设长度上限
   const fd = fs.openSync(file, 'r');
-  const buf = Buffer.alloc(262144);
-  const n = fs.readSync(fd, buf, 0, buf.length, 0);
-  fs.closeSync(fd);
-  const text = buf.toString('utf8', 0, n);
-  const firstLine = text.slice(0, text.indexOf('\n') === -1 ? text.length : text.indexOf('\n'));
-  const meta = safeParse(firstLine);
-  return meta?.type === 'session_meta' ? meta.payload : null;
+  try {
+    const chunks: Buffer[] = [];
+    const buf = Buffer.alloc(262144);
+    let position = 0;
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, position);
+      if (n <= 0) break;
+      const newline = buf.subarray(0, n).indexOf(0x0a);
+      if (newline !== -1) { chunks.push(Buffer.from(buf.subarray(0, newline))); break; }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+      position += n;
+    }
+    const meta = safeParse(Buffer.concat(chunks).toString('utf8'));
+    return meta?.type === 'session_meta' ? meta.payload : null;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
-const normPath = (p) => String(p || '').replaceAll('\\', '/').toLowerCase().replace(/\/+$/, '');
+// 仅 Windows 大小写不敏感; Linux/macOS 保留大小写以免错配项目目录
+const normPath = (p: unknown): string => {
+  const s = String(p || '').replaceAll('\\', '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? s.toLowerCase() : s;
+};
 
-export function listSessions(cwd) {
+export function listSessions(cwd: string): SessionInfo[] {
   const target = normPath(cwd);
-  const sessions = [];
+  const sessions: SessionInfo[] = [];
   for (const file of allSessionFiles()) {
     const meta = readMeta(file);
     if (!meta || normPath(meta.cwd) !== target) continue;
@@ -64,33 +79,36 @@ export function listSessions(cwd) {
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-function findSessionFile(sessionId) {
+function findSessionFile(sessionId: string): string {
+  // 只匹配文件名中的 uuid 段 (锚定开头), 避免部分 id 命中时间戳或其他会话
+  const wanted = String(sessionId).toLowerCase();
   for (const file of allSessionFiles()) {
-    if (file.includes(sessionId)) return file;
+    const m = path.basename(file, '.jsonl').match(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$/);
+    if (m?.[1] && m[1].toLowerCase().startsWith(wanted)) return file;
   }
   throw new Error(`未找到 Codex 会话: ${sessionId}`);
 }
 
 // custom_tool_call 的 input 是 JS 脚本, 尝试提取 shell 命令
-function extractShellCommand(script) {
+function extractShellCommand(script: unknown): string | null {
   const m = String(script || '').match(/shell_command\(\{command:\s*("(?:[^"\\]|\\.)*")/);
-  if (m) {
+  if (m?.[1]) {
     try { return JSON.parse(m[1]); } catch {}
   }
   return null;
 }
 
-const itemText = (content) => (Array.isArray(content) ? content.map((c) => c.text || '').join('\n') : String(content ?? ''));
+const itemText = (content: unknown): string => (Array.isArray(content) ? content.map((c) => c.text || '').join('\n') : String(content ?? ''));
 
-export function readSession(cwd, sessionId) {
+export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   const file = findSessionFile(sessionId);
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter(Boolean);
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
 
-  const events = [];
-  const skipped = {};
+  const events: CanonicalEvent[] = [];
+  const skipped: Record<string, number> = {};
   let title = '';
   // 先收集工具输出 (call_id → output)
-  const outputs = new Map();
+  const outputs = new Map<string, string>();
   for (const l of lines) {
     const p = l.payload;
     if (l.type === 'response_item' && (p?.type === 'custom_tool_call_output' || p?.type === 'function_call_output')) {
@@ -112,7 +130,7 @@ export function readSession(cwd, sessionId) {
           else skipped[`注入消息(${p.role})`] = (skipped[`注入消息(${p.role})`] || 0) + 1;
           break;
         case 'reasoning': {
-          const text = (p.summary || []).map((s) => s.text || '').join('\n');
+          const text = (p.summary || []).map((s: NativeRecord) => s.text || '').join('\n');
           if (text) events.push({ kind: 'thinking', ts, text, signature: '' });
           break;
         }
@@ -150,24 +168,31 @@ export function readSession(cwd, sessionId) {
 // ---- 写入 ----
 
 // uuid v7 风格 (时间戳前缀), 与 codex 会话 id 格式一致
-function uuidV7(ms = Date.now()) {
+function uuidV7(ms = Date.now()): string {
   const hex = ms.toString(16).padStart(12, '0');
   const rand = randomUUID().replaceAll('-', '');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7${rand.slice(0, 3)}-${((parseInt(rand.slice(3, 4), 16) & 0x3) | 0x8).toString(16)}${rand.slice(4, 7)}-${rand.slice(7, 19)}`;
 }
 
-export function writeReady() {
+export function writeReady(): string | null {
   return null;
+}
+
+interface CodexConfigTemplate {
+  modelProvider: string;
+  baseInstructions?: string;
+  cliVersion: string;
+  turnContext: NativeRecord | null;
 }
 
 // 取最近一个真实 codex 会话作为配置模板 (model_provider/base_instructions/turn_context)
 // TUI resume 会从 rollout 恢复线程配置, 缺 model_provider 会报 "Model provider `` not found"
-function configTemplate() {
+function configTemplate(): CodexConfigTemplate {
   const files = allSessionFiles().map((f) => ({ f, m: fs.statSync(f).mtimeMs })).sort((a, b) => b.m - a.m);
   for (const { f } of files) {
     const meta = readMeta(f);
     if (!meta || meta.originator === 'agent-connect' || !meta.model_provider) continue;
-    let turnContext = null;
+    let turnContext: NativeRecord | null = null;
     for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
       const o = safeParse(line);
       if (o?.type === 'turn_context') { turnContext = o.payload; break; }
@@ -177,13 +202,13 @@ function configTemplate() {
   return { modelProvider: 'openai', baseInstructions: undefined, cliVersion: '0.144.6', turnContext: null };
 }
 
-export function writeSession(cwd, title, events) {
+export function writeSession(cwd: string, title: string, events: CanonicalEvent[]): WriteSessionResult {
   const now = new Date();
   const sessionId = uuidV7(now.getTime());
   const iso = now.toISOString();
   const tpl = configTemplate();
-  const lines = [];
-  const push = (type, payload, ts) => lines.push({ timestamp: ts, type, payload });
+  const lines: NativeRecord[] = [];
+  const push = (type: string, payload: NativeRecord, ts: string) => lines.push({ timestamp: ts, type, payload });
 
   push('session_meta', {
     session_id: sessionId, id: sessionId, timestamp: iso, cwd,
@@ -202,11 +227,11 @@ export function writeSession(cwd, title, events) {
 
   // 真实 rollout 中助手内容在两条流各写一份: response_item(模型上下文) + event_msg(TUI 显示)
   const msgId = () => `msg_${randomUUID().replaceAll('-', '')}`;
-  const userMsg = (text, ts) => {
+  const userMsg = (text: string, ts: string) => {
     push('event_msg', { type: 'user_message', message: text, images: [], local_images: [], text_elements: [] }, ts);
     push('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }, ts);
   };
-  const assistantMsg = (text, phase, ts) => {
+  const assistantMsg = (text: string, phase: string, ts: string) => {
     push('response_item', { type: 'message', id: msgId(), role: 'assistant', content: [{ type: 'output_text', text }], phase }, ts);
     push('event_msg', { type: 'agent_message', message: text, phase, memory_citation: null }, ts);
   };
@@ -237,12 +262,12 @@ export function writeSession(cwd, title, events) {
     }
   }
 
-  // 按 codex 目录规则写入: sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl
-  const dir = path.join(sessionsDir(), String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0'));
+  // 按 codex 目录规则写入: sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl (目录与文件名时间戳同取 UTC, 避免跨午夜错位)
+  const dir = path.join(sessionsDir(), ...iso.slice(0, 10).split('-'));
   fs.mkdirSync(dir, { recursive: true });
   const tsName = iso.slice(0, 19).replaceAll(':', '-');
   const file = path.join(dir, `rollout-${tsName}-${sessionId}.jsonl`);
-  fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  atomicWriteFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return { id: sessionId, resumeHint: `codex resume ${sessionId}` };
 }
 
