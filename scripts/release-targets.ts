@@ -17,10 +17,13 @@ export function artifactName(version: string, target: BuildTarget): string {
 }
 
 export function hostBuildTarget(): BuildTarget {
-  const platform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : process.platform;
-  const architecture = process.platform === 'win32' ? 'x64' : process.arch;
-  const name = `${platform}-${architecture}`;
+  const platform = process.platform === 'win32' ? 'windows' : process.platform;
+  const name = `${platform}-${process.arch}`;
   const target = BUILD_TARGETS.find((candidate) => candidate.name === name);
-  if (!target) throw new Error(`Unsupported local build platform: ${process.platform}/${process.arch}`);
+  if (!target) {
+    throw new Error(
+      `Unsupported architecture for local builds: ${process.platform}/${process.arch}. Supported targets: ${BUILD_TARGETS.map((candidate) => candidate.name).join(', ')}`,
+    );
+  }
   return target;
 }

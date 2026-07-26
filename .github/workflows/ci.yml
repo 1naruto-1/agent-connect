@@ -35,7 +35,19 @@ jobs:
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.sha }}"
       - name: Check pushed commits for whitespace
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        run: git diff --check "${{ github.event.before }}..${{ github.sha }}"
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # A force-push can make github.event.before unreachable; fall back instead of failing.
+          if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            git diff --check "$BEFORE_SHA..$GITHUB_SHA"
+          elif git rev-parse --verify --quiet "$GITHUB_SHA~1" >/dev/null; then
+            echo "Base commit $BEFORE_SHA is unreachable; checking against the parent commit instead."
+            git diff --check "$GITHUB_SHA~1..$GITHUB_SHA"
+          else
+            echo "Base commit $BEFORE_SHA is unreachable and $GITHUB_SHA has no parent; skipping whitespace check."
+          fi
       - name: Check initial pushed history for whitespace
         if: github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000'
         shell: bash
@@ -47,3 +59,9 @@ jobs:
       - run: bun run build
       - run: bun run smoke:build
       - run: bun run verify:checksums
+      - name: Cross-compile all release targets
+        if: matrix.os == 'ubuntu-latest'
+        run: bun run build -- --all
+      - name: Verify checksums for all release targets
+        if: matrix.os == 'ubuntu-latest'
+        run: bun run verify:checksums -- --all

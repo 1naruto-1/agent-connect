@@ -22,6 +22,13 @@ jobs:
       release_sha: ${{ steps.release.outputs.release_sha }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
+      - name: Enforce strict release tag shape
+        shell: bash
+        run: |
+          # Release tags are vMAJOR.MINOR.PATCH with an optional pre-release; build metadata is rejected.
+          case "$GITHUB_REF_NAME" in
+            *+*) echo "Release tag $GITHUB_REF_NAME must not contain build metadata (+)." >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -60,9 +67,8 @@ jobs:
             exit 1
           fi
           version="${GITHUB_REF_NAME#v}"
-          version_without_build="${version%%+*}"
           prerelease=false
-          case "$version_without_build" in *-*) prerelease=true ;; esac
+          case "$version" in *-*) prerelease=true ;; esac
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
       - name: Require successful CI workflow for release commit
@@ -144,22 +150,44 @@ jobs:
       - name: Smoke-test Unix release binary
         if: matrix.shell == 'bash'
         shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
-          binary="dist/${{ matrix.asset }}"
-          case "${{ matrix.asset }}" in
+          binary="dist/$ASSET"
+          case "$ASSET" in
             *-arm64) case "$(uname -m)" in arm64|aarch64) ;; *) echo 'Expected an arm64 runner.' >&2; exit 1 ;; esac ;;
             *-x64) [ "$(uname -m)" = 'x86_64' ] || { echo 'Expected an x64 runner.' >&2; exit 1; } ;;
           esac
+          awk -v asset="$ASSET" '
+            NF == 2 {
+              name = $2
+              sub(/^\*/, "", name)
+              if (name == asset) { print; found = 1 }
+            }
+            END { exit found ? 0 : 1 }
+          ' dist/SHA256SUMS > "$RUNNER_TEMP/asset.sum" || { echo "SHA256SUMS does not contain $ASSET." >&2; exit 1; }
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum -c "$RUNNER_TEMP/asset.sum")
+          else
+            (cd dist && shasum -a 256 -c "$RUNNER_TEMP/asset.sum")
+          fi
           chmod 755 "$binary"
           test "$("$binary" --version)" = "${GITHUB_REF_NAME#v}"
           "$binary" --help | grep -F 'agent-connect' >/dev/null
       - name: Smoke-test Windows release binary
         if: matrix.shell == 'pwsh'
         shell: pwsh
+        env:
+          ASSET: ${{ matrix.asset }}
         run: |
-          $binary = Resolve-Path 'dist/${{ matrix.asset }}'
+          $binary = Resolve-Path "dist/$env:ASSET"
           if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Expected an x64 Windows runner.' }
+          $line = Get-Content -LiteralPath 'dist/SHA256SUMS' | Where-Object { $_ -match "^[A-Fa-f0-9]{64}\s+\*?$([regex]::Escape($env:ASSET))$" } | Select-Object -First 1
+          if (-not $line) { throw "SHA256SUMS does not contain $env:ASSET." }
+          $expectedHash = ($line -split '\s+')[0].ToLowerInvariant()
+          $actualHash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "Checksum mismatch for $env:ASSET." }
           $expected = $env:GITHUB_REF_NAME.Substring(1)
           $actual = (& $binary --version | Out-String).Trim()
           if ($actual -ne $expected) { throw "Expected $expected, received $actual" }
