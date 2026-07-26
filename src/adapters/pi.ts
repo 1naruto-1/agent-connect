@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
+import { normalizeTitle, titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionResult } from '../types.ts';
 
 export const id = 'pi';
@@ -24,6 +25,21 @@ export function available(): boolean {
 const parseLines = (file: string): NativeRecord[] =>
   fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
 
+const blockText = (content: unknown): string =>
+  typeof content === 'string' ? content : ((content as NativeRecord[]) || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+
+// session_info 可在会话中途多次出现, 取最后一个; 没有显式名称时退回首条用户消息
+function sessionTitle(lines: NativeRecord[]): string {
+  const explicit = lines.filter((l) => l.type === 'session_info' && l.name).at(-1)?.name;
+  if (explicit) return normalizeTitle(explicit);
+  for (const l of lines) {
+    if (l.type !== 'message' || l.message?.role !== 'user') continue;
+    const candidate = titleFromMessage(blockText(l.message.content));
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
 export function listSessions(cwd: string): SessionInfo[] {
   const dir = sessionDir(cwd);
   if (!fs.existsSync(dir)) return [];
@@ -34,13 +50,7 @@ export function listSessions(cwd: string): SessionInfo[] {
     const lines = parseLines(file);
     const header = lines.find((l) => l.type === 'session');
     if (!header) continue;
-    let title = lines.filter((l) => l.type === 'session_info' && l.name).at(-1)?.name || '';
-    if (!title) {
-      const firstUser = lines.find((l) => l.type === 'message' && l.message?.role === 'user');
-      const c = firstUser?.message?.content;
-      title = (typeof c === 'string' ? c : c?.filter((b: NativeRecord) => b.type === 'text').map((b: NativeRecord) => b.text).join(' ') || '').replace(/\s+/g, ' ').slice(0, 60);
-    }
-    sessions.push({ id: header.id, title: title || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, count: lines.length, file });
+    sessions.push({ id: header.id, title: sessionTitle(lines) || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, count: lines.length, file });
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -59,9 +69,6 @@ function toCanonicalTool(call: NativeRecord): { tool: ToolEvent['tool']; input: 
     default: return canonicalToolFromName(call.name, a) || { tool: 'other', input: { name: call.name, args: a } };
   }
 }
-
-const blockText = (content: unknown): string =>
-  typeof content === 'string' ? content : ((content as NativeRecord[]) || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
 export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   const dir = sessionDir(cwd);
@@ -84,10 +91,9 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
-  let title = '';
   for (const l of lines) {
     const ts = l.timestamp || new Date().toISOString();
-    if (l.type === 'session_info' && l.name) { title = l.name; continue; }
+    if (l.type === 'session_info' && l.name) continue;
     if (l.type === 'compaction') {
       events.push({ kind: 'marker', ts, text: `[Pi 曾在此处压缩上下文, 摘要: ${String(l.summary || '').slice(0, 200)}]` });
       continue;
@@ -117,7 +123,7 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
     }
     // toolResult 已合并
   }
-  return { title: title || sessionId.slice(0, 8), events, skipped };
+  return { title: sessionTitle(lines) || titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
 }
 
 // ---- 写入 ----

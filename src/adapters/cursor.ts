@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { openCursorDb, cursorDbPath, listSessions as listCursorSessions, loadSession, loadContentSnapshot, loadSubagentSession } from '../cursor.ts';
 import { writeCursorSession, assertCursorClosed } from '../cursor-writer.ts';
 import { safeParse } from '../events.ts';
+import { normalizeTitle, titleFromEvents, untitledSession } from '../title.ts';
 import fs from 'node:fs';
 import type { Database } from 'bun:sqlite';
 import type { CursorBubble } from '../cursor-writer.ts';
@@ -25,7 +26,8 @@ export function listSessions(cwd: string): SessionInfo[] {
   try {
     return listCursorSessions(db(), cwd).map((s) => ({
       id: s.composerId,
-      title: s.name === '(无标题)' && s.subtitle ? s.subtitle.slice(0, 60) : s.name,
+      // src/cursor.ts 在没有 name 时填入 '(无标题)' 哨兵, 此时退回 Cursor 自己的 subtitle
+      title: s.name === '(无标题)' && s.subtitle ? normalizeTitle(s.subtitle) : normalizeTitle(s.name),
       updatedAt: s.lastUpdatedAt || s.createdAt || 0,
       count: undefined,
     }));
@@ -154,7 +156,8 @@ export function readSession(cwd: string, composerId: string): ReadSessionResult 
       skipped[`capabilityType=${cap}`] = (skipped[`capabilityType=${cap}`] || 0) + 1;
     }
   }
-  return { title: session.composer.name || composerId.slice(0, 8), events, skipped };
+  const explicit = normalizeTitle(session.composer.name) || normalizeTitle(session.composer.subtitle);
+  return { title: explicit || titleFromEvents(events) || untitledSession(label, composerId), events, skipped };
 }
 
 // ---- 写入: 统一事件流 → bubble 流 (legacy 完整字段模板在 cursor-writer 中) ----

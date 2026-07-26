@@ -70,6 +70,29 @@ describe('claude adapter', () => {
     expect(found!.title).toBe('hello claude');
   });
 
+  // 没有 ai-title 时, 迁移写入目标 Harness 的名称必须与列表显示一致, 而不是退化成会话 id
+  test('readSession inherits the first prompt when ai-title is absent', () => {
+    expect(claude.readSession(projectCwd, sessionId).title).toBe('hello claude');
+  });
+
+  test('readSession prefers ai-title over the first prompt', () => {
+    const titled = randomUUID();
+    writeJsonl(path.join(sessionDir, `${titled}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: 'first prompt' } },
+      { type: 'ai-title', aiTitle: 'harness generated title', sessionId: titled },
+    ]);
+    expect(claude.readSession(projectCwd, titled).title).toBe('harness generated title');
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === titled)!.title).toBe('harness generated title');
+  });
+
+  test('readSession names the harness when only slash-command wrappers exist', () => {
+    const wrapped = randomUUID();
+    writeJsonl(path.join(sessionDir, `${wrapped}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: '<command-name>/model</command-name>' } },
+    ]);
+    expect(claude.readSession(projectCwd, wrapped).title).toBe(`Claude Code 会话 ${wrapped.slice(0, 8)}`);
+  });
+
   test('readSession yields the canonical event sequence with joined tool output', () => {
     const { events, skipped } = claude.readSession(projectCwd, sessionId);
     expect(events.map((e: CanonicalEvent) => e.kind)).toEqual(['user', 'assistant-text', 'tool']);
@@ -148,6 +171,18 @@ describe('codex adapter', () => {
     expect(skipped).toEqual({});
   });
 
+  // 链式迁移: 上一跳写入的来源说明是普通用户消息, 不能被当成标题继续传下去
+  test('readSession skips the agent-connect provenance marker when titling', () => {
+    const chained = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-01-${chained}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: chained, id: chained, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: '[agent-connect] 本会话由 Claude Code 会话《abc》迁移而来。' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: '真正的问题' } },
+    ]);
+    expect(codex.readSession(projectCwd, chained).title).toBe('真正的问题');
+    expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === chained)!.title).toBe('真正的问题');
+  });
+
   test('session lookup resolves a partial uuid prefix', () => {
     const { title } = codex.readSession(projectCwd, sessionId.slice(0, 8));
     expect(title).toBe('list files please');
@@ -214,6 +249,17 @@ describe('pi adapter', () => {
     expect(tool.tool).toBe('terminal');
     expect(tool.input.command).toBe('pwd');
     expect(tool.output).toBe('/work');
+  });
+
+  // pi 常常没有 session_info, 此时列表与迁移写出的名称都应取首条提问
+  test('readSession inherits the first prompt when session_info is absent', () => {
+    const untitled = randomUUID();
+    writeJsonl(path.join(sessionDir, `2026-07-26T10-00-01-000Z_${untitled}.jsonl`), [
+      { type: 'session', version: 3, id: untitled, timestamp: TS, cwd: projectCwd },
+      { type: 'message', id: 'e1', parentId: null, timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: '帮我看看这个报错' }] } },
+    ]);
+    expect(pi.readSession(projectCwd, untitled).title).toBe('帮我看看这个报错');
+    expect(pi.listSessions(projectCwd).find((s: { id: string }) => s.id === untitled)!.title).toBe('帮我看看这个报错');
   });
 
   test('readSession for a missing project dir throws 未找到, not ENOENT', () => {

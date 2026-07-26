@@ -70,6 +70,8 @@ After `agent-connect install`, Claude Code can use `/resume-cursor`, `/resume-co
 
 Agent Connect preserves ordered user messages, assistant text, available thinking blocks, tool calls, inputs, outputs, errors, file edits, terminal results, search/web activity, todos, questions, subagents, and MCP calls.
 
+The session title carries over too: Agent Connect reuses the title the source Harness stored, and falls back to the first user prompt when the source keeps no explicit title.
+
 A shared canonical event stream sits between a source and target adapter. If the target Harness has no native form for a tool call, Agent Connect keeps the original arguments and result as readable text instead of silently dropping it. A migration always creates a new target session; it never changes the source session.
 
 ## Data locations

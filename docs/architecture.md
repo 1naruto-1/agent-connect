@@ -72,6 +72,8 @@ Every module in `src/adapters/` exports the same operational surface:
 
 `src/adapters/index.ts` is the single registry. Add an adapter there only after its reader and writer both satisfy this contract.
 
+`listSessions()` and `readSession()` must resolve a title through the shared helpers in `src/title.ts`, because `readSession().title` becomes the session name in the target Harness. The order is: the explicit title the Harness stored (`ai-title`, `session_info.name`, `composer.name`) → the first user message that is neither an `[agent-connect]` provenance marker nor a Harness-injected wrapper such as `<command-name>` → `untitledSession()`, which names the source Harness instead of a bare session id. `listSessions()` skips the last step, since the id is already in the row.
+
 ## Native storage integrations
 
 | Tool | Session store | Implementation notes |

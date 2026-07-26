@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { safeParse } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
+import { normalizeTitle, titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionMeta, WriteSessionResult } from '../types.ts';
 
 export const id = 'claude';
@@ -25,6 +26,18 @@ export function available(): boolean {
 const parseLines = (file: string): NativeRecord[] =>
   fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
 
+// ai-title 可能出现在首条用户消息之后, 因此整份扫描而不提前退出
+function sessionTitle(lines: NativeRecord[]): string {
+  let explicit = '', derived = '';
+  for (const l of lines) {
+    if (l.type === 'ai-title') explicit = normalizeTitle(l.aiTitle);
+    if (!derived && l.type === 'user' && !l.isMeta && typeof l.message?.content === 'string') {
+      derived = titleFromMessage(l.message.content);
+    }
+  }
+  return explicit || derived;
+}
+
 export function listSessions(cwd: string): SessionInfo[] {
   const dir = projectDir(cwd);
   if (!fs.existsSync(dir)) return [];
@@ -32,19 +45,10 @@ export function listSessions(cwd: string): SessionInfo[] {
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.jsonl')) continue;
     const file = path.join(dir, f);
-    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
-    let title = '', firstPrompt = '';
-    for (const l of lines) {
-      const o = safeParse(l);
-      if (!o) continue;
-      if (o.type === 'ai-title') title = o.aiTitle;
-      if (!firstPrompt && o.type === 'user' && !o.isMeta && typeof o.message?.content === 'string' && !o.message.content.startsWith('<')) {
-        firstPrompt = o.message.content.replace(/\s+/g, ' ').slice(0, 60);
-      }
-    }
+    const lines = parseLines(file);
     sessions.push({
       id: f.replace('.jsonl', ''),
-      title: title || firstPrompt || '(无标题)',
+      title: sessionTitle(lines) || '(无标题)',
       updatedAt: fs.statSync(file).mtimeMs,
       count: lines.length,
     });
@@ -98,10 +102,9 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
-  let title = '';
   for (const l of lines) {
     const ts = l.timestamp || new Date().toISOString();
-    if (l.type === 'ai-title') { title = l.aiTitle; continue; }
+    if (l.type === 'ai-title') continue;
     if (l.type === 'user') {
       const c = l.message?.content;
       if (l.isMeta) {
@@ -126,7 +129,7 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
       skipped[l.type] = (skipped[l.type] || 0) + 1;
     }
   }
-  return { title: title || sessionId.slice(0, 8), events, skipped };
+  return { title: sessionTitle(lines) || titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
 }
 
 // ---- 写入 ----

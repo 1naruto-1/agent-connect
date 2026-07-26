@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { safeParse, canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
+import { titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
 export const id = 'codex';
@@ -59,22 +60,24 @@ const normPath = (p: unknown): string => {
   return process.platform === 'win32' ? s.toLowerCase() : s;
 };
 
+// Codex 不保存显式标题; 取第一条可用作标题的用户消息, 命中即停
+function sessionTitle(file: string): string {
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const o = safeParse(line);
+    if (o?.type !== 'event_msg' || o.payload?.type !== 'user_message') continue;
+    const candidate = titleFromMessage(o.payload.message);
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
 export function listSessions(cwd: string): SessionInfo[] {
   const target = normPath(cwd);
   const sessions: SessionInfo[] = [];
   for (const file of allSessionFiles()) {
     const meta = readMeta(file);
     if (!meta || normPath(meta.cwd) !== target) continue;
-    // 标题取第一条用户消息
-    let title = '';
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      const o = safeParse(line);
-      if (o?.type === 'event_msg' && o.payload?.type === 'user_message') {
-        title = String(o.payload.message || '').replace(/\s+/g, ' ').slice(0, 60);
-        break;
-      }
-    }
-    sessions.push({ id: meta.session_id || meta.id, title: title || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, file });
+    sessions.push({ id: meta.session_id || meta.id, title: sessionTitle(file) || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, file });
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -106,7 +109,6 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
-  let title = '';
   // 先收集工具输出 (call_id → output)
   const outputs = new Map<string, string>();
   for (const l of lines) {
@@ -120,7 +122,6 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
     const ts = l.timestamp || new Date().toISOString();
     const p = l.payload;
     if (l.type === 'event_msg' && p?.type === 'user_message') {
-      if (!title) title = String(p.message || '').replace(/\s+/g, ' ').slice(0, 60);
       events.push({ kind: 'user', ts, text: p.message || '' });
     } else if (l.type === 'response_item') {
       switch (p?.type) {
@@ -162,7 +163,7 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
       if (!['event:agent_message', 'event:agent_reasoning'].includes(key)) skipped[key] = (skipped[key] || 0) + 1;
     }
   }
-  return { title: title || sessionId.slice(0, 8), events, skipped };
+  return { title: titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
 }
 
 // ---- 写入 ----
