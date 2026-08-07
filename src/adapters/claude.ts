@@ -1,11 +1,14 @@
 // Claude Code 适配器: ~/.claude/projects/<编码路径>/<sessionId>.jsonl
+// 读取语义与官方 resume 对齐 (parentUuid 活跃链 / isSidechain / snip / compact), 核心移植见 claude-session.ts
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { safeParse } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
 import { normalizeTitle, titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
+import {
+  effectiveTranscript, isCompactBoundary, loadEffectiveTranscript, loadTranscriptEntries,
+} from './claude-session.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionMeta, WriteSessionResult } from '../types.ts';
 
 export const id = 'claude';
@@ -23,19 +26,18 @@ export function available(): boolean {
   return fs.existsSync(path.join(homeDirectory(), '.claude'));
 }
 
-const parseLines = (file: string): NativeRecord[] =>
-  fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
-
-// ai-title 可能出现在首条用户消息之后, 因此整份扫描而不提前退出
-function sessionTitle(lines: NativeRecord[]): string {
-  let explicit = '', derived = '';
-  for (const l of lines) {
-    if (l.type === 'ai-title') explicit = normalizeTitle(l.aiTitle);
-    if (!derived && l.type === 'user' && !l.isMeta && typeof l.message?.content === 'string') {
-      derived = titleFromMessage(l.message.content);
+// Claude 标题优先级与官方 lite metadata 一致: custom-title > ai-title > 首条用户消息
+function sessionTitle(customTitle: string, aiTitle: string, messages: NativeRecord[]): string {
+  const explicit = normalizeTitle(customTitle) || normalizeTitle(aiTitle);
+  if (explicit) return explicit;
+  for (const l of messages) {
+    if (l.type !== 'user' || l.isMeta) continue;
+    if (typeof l.message?.content === 'string') {
+      const derived = titleFromMessage(l.message.content);
+      if (derived) return derived;
     }
   }
-  return explicit || derived;
+  return '';
 }
 
 export function listSessions(cwd: string): SessionInfo[] {
@@ -45,12 +47,12 @@ export function listSessions(cwd: string): SessionInfo[] {
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.jsonl')) continue;
     const file = path.join(dir, f);
-    const lines = parseLines(file);
+    const effective = loadEffectiveTranscript(file);
     sessions.push({
       id: f.replace('.jsonl', ''),
-      title: sessionTitle(lines) || '(无标题)',
+      title: sessionTitle(effective.customTitle, effective.aiTitle, effective.messages) || '(无标题)',
       updatedAt: fs.statSync(file).mtimeMs,
-      count: lines.length,
+      count: effective.messages.length,
     });
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -90,10 +92,12 @@ function resultText(content: unknown): string {
 export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   const file = path.join(projectDir(cwd), `${sessionId}.jsonl`);
   if (!fs.existsSync(file)) throw new Error(`未找到 Claude Code 会话: ${file}`);
-  const lines = parseLines(file);
+  const entries = loadTranscriptEntries(file);
+  // 与 Claude --resume 一致: 只迁移 parentUuid 活跃链上的消息
+  const { messages, customTitle, aiTitle, abandonedCount, snippedCount } = effectiveTranscript(entries);
 
   const results = new Map<string, NativeRecord>();
-  for (const l of lines) {
+  for (const l of messages) {
     if (l.type !== 'user' || !Array.isArray(l.message?.content)) continue;
     for (const b of l.message.content) {
       if (b.type === 'tool_result') results.set(b.tool_use_id, b);
@@ -102,9 +106,11 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
-  for (const l of lines) {
+  if (abandonedCount > 0) skipped['已废弃分支'] = abandonedCount;
+  if (snippedCount > 0) skipped['已裁剪消息'] = snippedCount;
+
+  for (const l of messages) {
     const ts = l.timestamp || new Date().toISOString();
-    if (l.type === 'ai-title') continue;
     if (l.type === 'user') {
       const c = l.message?.content;
       if (l.isMeta) {
@@ -112,7 +118,8 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
       } else if (typeof c === 'string') {
         events.push({ kind: 'user', ts, text: c });
       } else if (Array.isArray(c)) {
-        const text = c.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+        // 纯 tool_result 用户行已并入对应 tool 事件, 这里只取文本
+        const text = c.filter((b: NativeRecord) => b.type === 'text').map((b: NativeRecord) => b.text).join('\n');
         if (text) events.push({ kind: 'user', ts, text });
       }
     } else if (l.type === 'assistant' && Array.isArray(l.message?.content)) {
@@ -125,11 +132,24 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
           events.push({ kind: 'tool', ts, tool, input, output: r ? resultText(r.content) : '', isError: r?.is_error || false, origName: b.name });
         }
       }
+    } else if (isCompactBoundary(l)) {
+      const summarized = l.compactMetadata?.messagesSummarized;
+      events.push({
+        kind: 'marker',
+        ts,
+        text: typeof summarized === 'number'
+          ? `[Claude Code 曾在此处压缩上下文, 约 ${summarized} 条消息]`
+          : '[Claude Code 曾在此处压缩上下文]',
+      });
     } else if (l.type && l.type !== 'assistant') {
       skipped[l.type] = (skipped[l.type] || 0) + 1;
     }
   }
-  return { title: sessionTitle(lines) || titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
+  return {
+    title: sessionTitle(customTitle, aiTitle, messages) || titleFromEvents(events) || untitledSession(label, sessionId),
+    events,
+    skipped,
+  };
 }
 
 // ---- 写入 ----

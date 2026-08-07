@@ -77,6 +77,8 @@ A shared canonical event stream sits between a source and target adapter. If the
 
 Pi sessions form a tree of records: retried prompts or `/tree` navigation leave abandoned branches behind. Agent Connect follows Pi's own resume semantics and migrates only the active branch (the path from the last record back to the root via `parentId`); abandoned branches are counted as skipped records in the migration report.
 
+Claude Code sessions are likewise append-only JSONL message trees: rewinds and retries leave abandoned `parentUuid` forks. Agent Connect follows Claude's own `--resume` semantics and migrates only the active chain from the latest non-sidechain leaf back to the root; snipped ranges and abandoned forks are counted as skipped records, and `compact_boundary` is kept as a marker.
+
 Codex rollouts are append-only JSONL: a user rollback appends `thread_rolled_back`. Agent Connect follows Codex's own resume semantics and migrates only the turns that remain after rollback; dropped turns are counted as skipped records in the migration report. Paginated `item_completed` (`UserMessage`) events are recognized alongside legacy `user_message`.
 
 ## Data locations

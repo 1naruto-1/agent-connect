@@ -135,6 +135,82 @@ describe('claude adapter', () => {
     expect(tool.input.command).toBe('echo hi');
     expect(tool.output).toBe('hi');
   });
+
+  // JSONL 是 parentUuid 树; 与 Claude --resume 一致, 只迁移「最近非 sidechain leaf → 根」的活跃链
+  test('readSession follows the active parentUuid branch and skips abandoned forks', () => {
+    const branched = randomUUID();
+    const u1 = randomUUID(), a1 = randomUUID(), u2 = randomUUID(), a2 = randomUUID(), u3 = randomUUID(), a3 = randomUUID();
+    writeJsonl(path.join(sessionDir, `${branched}.jsonl`), [
+      { type: 'user', uuid: u1, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'first question' } },
+      { type: 'assistant', uuid: a1, parentUuid: u1, isSidechain: false, timestamp: TS, message: { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] } },
+      // 废弃分支
+      { type: 'user', uuid: u2, parentUuid: a1, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'abandoned question' } },
+      { type: 'assistant', uuid: a2, parentUuid: u2, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'abandoned answer' }] } },
+      // 从 a1 重试, 时间更新 → 成为 leaf
+      { type: 'user', uuid: u3, parentUuid: a1, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z', message: { role: 'user', content: 'retried question' } },
+      { type: 'assistant', uuid: a3, parentUuid: u3, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'final answer' }] } },
+    ]);
+    const { events, skipped } = claude.readSession(projectCwd, branched);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'first question'],
+      ['assistant-text', 'first answer'],
+      ['user', 'retried question'],
+      ['assistant-text', 'final answer'],
+    ]);
+    expect(skipped['已废弃分支']).toBe(2);
+  });
+
+  test('readSession prefers custom-title over ai-title', () => {
+    const titled = randomUUID();
+    writeJsonl(path.join(sessionDir, `${titled}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: 'first prompt' } },
+      { type: 'ai-title', aiTitle: 'ai generated', sessionId: titled },
+      { type: 'custom-title', customTitle: 'user renamed', sessionId: titled },
+    ]);
+    expect(claude.readSession(projectCwd, titled).title).toBe('user renamed');
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === titled)!.title).toBe('user renamed');
+  });
+
+  test('readSession keeps compact_boundary as a marker on the active chain', () => {
+    const compacted = randomUUID();
+    const u1 = randomUUID(), boundary = randomUUID(), u2 = randomUUID();
+    writeJsonl(path.join(sessionDir, `${compacted}.jsonl`), [
+      { type: 'user', uuid: u1, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'before compact' } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'manual', preTokens: 1000, messagesSummarized: 12 },
+      },
+      { type: 'user', uuid: u2, parentUuid: boundary, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'user', content: 'after compact' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, compacted);
+    expect(events.map((e: CanonicalEvent) => e.kind)).toEqual(['marker', 'user']);
+    expect((events[0] as any).text).toContain('12');
+    expect((events[1] as any).text).toBe('after compact');
+  });
+
+  test('readSession applies snipMetadata removals before building the chain', () => {
+    const snipped = randomUUID();
+    const u1 = randomUUID(), a1 = randomUUID(), u2 = randomUUID(), a2 = randomUUID(), u3 = randomUUID(), boundary = randomUUID();
+    writeJsonl(path.join(sessionDir, `${snipped}.jsonl`), [
+      { type: 'user', uuid: u1, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'keep start' } },
+      { type: 'assistant', uuid: a1, parentUuid: u1, isSidechain: false, timestamp: TS, message: { role: 'assistant', content: [{ type: 'text', text: 'kept reply' }] } },
+      { type: 'user', uuid: u2, parentUuid: a1, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'snip me' } },
+      { type: 'assistant', uuid: a2, parentUuid: u2, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'snipped reply' }] } },
+      { type: 'user', uuid: u3, parentUuid: a2, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z', message: { role: 'user', content: 'after snip' } },
+      {
+        type: 'system', uuid: boundary, parentUuid: u3, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z',
+        subtype: 'snip_boundary', snipMetadata: { removedUuids: [u2, a2] },
+      },
+    ]);
+    const { events, skipped } = claude.readSession(projectCwd, snipped);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'keep start'],
+      ['assistant-text', 'kept reply'],
+      ['user', 'after snip'],
+    ]);
+    expect(skipped['已裁剪消息']).toBe(2);
+  });
 });
 
 // ---- Codex CLI ----
