@@ -77,6 +77,8 @@ A shared canonical event stream sits between a source and target adapter. If the
 
 Pi sessions form a tree of records: retried prompts or `/tree` navigation leave abandoned branches behind. Agent Connect follows Pi's own resume semantics and migrates only the active branch (the path from the last record back to the root via `parentId`); abandoned branches are counted as skipped records in the migration report.
 
+Codex rollouts are append-only JSONL: a user rollback appends `thread_rolled_back`. Agent Connect follows Codex's own resume semantics and migrates only the turns that remain after rollback; dropped turns are counted as skipped records in the migration report. Paginated `item_completed` (`UserMessage`) events are recognized alongside legacy `user_message`.
+
 ## Data locations
 
 Agent Connect stores its own migration reports outside your project. It never creates `.agent-connect/` in a project.

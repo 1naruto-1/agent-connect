@@ -79,7 +79,7 @@ Every module in `src/adapters/` exports the same operational surface:
 | Tool | Session store | Implementation notes |
 | --- | --- | --- |
 | Claude Code | `~/.claude/projects/*/*.jsonl` | Writes JSONL messages, tool-use/result pairs, and session metadata. |
-| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Writes rollout JSONL; reuses configuration details from a recent native Codex session when available. |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Writes rollout JSONL; reuses configuration details from a recent native Codex session when available. `codex-session.ts` ports Codex resume semantics: `thread_rolled_back` drops the newest N user turns from the effective history (counted as skipped), and paginated `item_completed`/`UserMessage` events are treated as user turns alongside legacy `user_message`. Compaction becomes a marker (summary text preserved when present). |
 | Pi | `~/.pi/agent/sessions/--<project>--/*.jsonl` | Sessions are `id`/`parentId` record trees. `pi-session.ts` ports Pi's own `SessionManager` semantics: the reader follows the active branch (last record back to the root), applies v1→v3 format migration in memory only, and treats abandoned branches as skipped records. Compaction and branch summaries become markers. Writes a session header plus a linked record chain. |
 | Cursor | Cursor `state.vscdb` SQLite database | Reads through `bun:sqlite`; writes only new rows after Cursor is fully closed. `cursor-writer.ts` constructs the legacy composer and bubble shapes. |
 

@@ -1,5 +1,6 @@
 // Codex CLI 适配器: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // 恢复: codex resume <session-id>
+// 读取语义与官方 resume 对齐 (ThreadRolledBack / 分页 user_message), 核心移植见 codex-session.ts
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +8,9 @@ import { safeParse, canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
 import { titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
+import {
+  compactedMessage, effectiveRolloutLines, isUserMessageEvent, loadRolloutLines, userMessageText,
+} from './codex-session.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
 export const id = 'codex';
@@ -60,12 +64,12 @@ const normPath = (p: unknown): string => {
   return process.platform === 'win32' ? s.toLowerCase() : s;
 };
 
-// Codex 不保存显式标题; 取第一条可用作标题的用户消息, 命中即停
+// Codex 会话列表预览: 与 resume 一致先去掉被 ThreadRolledBack 丢弃的轮次, 再取首条可用用户消息
 function sessionTitle(file: string): string {
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    const o = safeParse(line);
-    if (o?.type !== 'event_msg' || o.payload?.type !== 'user_message') continue;
-    const candidate = titleFromMessage(o.payload.message);
+  const { lines } = effectiveRolloutLines(loadRolloutLines(file));
+  for (const line of lines) {
+    if (!isUserMessageEvent(line)) continue;
+    const candidate = titleFromMessage(userMessageText(line.payload || {}));
     if (candidate) return candidate;
   }
   return '';
@@ -103,13 +107,17 @@ function extractShellCommand(script: unknown): string | null {
 
 const itemText = (content: unknown): string => (Array.isArray(content) ? content.map((c) => c.text || '').join('\n') : String(content ?? ''));
 
-export function readSession(cwd: string, sessionId: string): ReadSessionResult {
+export function readSession(_cwd: string, sessionId: string): ReadSessionResult {
   const file = findSessionFile(sessionId);
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
+  const rawLines = loadRolloutLines(file);
+  // 与 Codex resume 一致: ThreadRolledBack 丢弃的用户轮次不进入事件流
+  const { lines, rolledBackTurns } = effectiveRolloutLines(rawLines);
 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
-  // 先收集工具输出 (call_id → output)
+  if (rolledBackTurns > 0) skipped['已回退轮次'] = rolledBackTurns;
+
+  // 先收集工具输出 (call_id → output); 只在有效历史上配对
   const outputs = new Map<string, string>();
   for (const l of lines) {
     const p = l.payload;
@@ -121,8 +129,8 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   for (const l of lines) {
     const ts = l.timestamp || new Date().toISOString();
     const p = l.payload;
-    if (l.type === 'event_msg' && p?.type === 'user_message') {
-      events.push({ kind: 'user', ts, text: p.message || '' });
+    if (isUserMessageEvent(l)) {
+      events.push({ kind: 'user', ts, text: userMessageText(p || {}) });
     } else if (l.type === 'response_item') {
       switch (p?.type) {
         case 'message':
@@ -156,11 +164,20 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
           skipped[`response_item:${p?.type}`] = (skipped[`response_item:${p?.type}`] || 0) + 1;
       }
     } else if (l.type === 'compacted') {
-      events.push({ kind: 'marker', ts, text: '[Codex 曾在此处压缩上下文]' });
+      const summary = compactedMessage(l);
+      events.push({
+        kind: 'marker',
+        ts,
+        text: summary
+          ? `[Codex 曾在此处压缩上下文, 摘要: ${summary}]`
+          : '[Codex 曾在此处压缩上下文]',
+      });
     } else if (l.type !== 'session_meta') {
       // event_msg 的 agent_message/agent_reasoning 与 response_item 重复, 其余为 UI/统计事件
       const key = l.type === 'event_msg' ? `event:${p?.type}` : l.type;
-      if (!['event:agent_message', 'event:agent_reasoning'].includes(key)) skipped[key] = (skipped[key] || 0) + 1;
+      if (!['event:agent_message', 'event:agent_reasoning', 'event:thread_rolled_back'].includes(key)) {
+        skipped[key] = (skipped[key] || 0) + 1;
+      }
     }
   }
   return { title: titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };

@@ -188,6 +188,68 @@ describe('codex adapter', () => {
     expect(title).toBe('list files please');
   });
 
+  // 与 Codex resume 一致: thread_rolled_back 丢弃最近 N 个用户轮次, 被回退内容不迁移
+  test('readSession drops turns removed by thread_rolled_back', () => {
+    const rolled = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-02-${rolled}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: rolled, id: rolled, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'keep this turn' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'kept answer' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'abandon this turn' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'abandoned answer' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'retry after rollback' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final answer' }] } },
+    ]);
+    const { events, skipped } = codex.readSession(projectCwd, rolled);
+    expect(events.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'keep this turn'],
+      ['assistant-text', 'kept answer'],
+      ['user', 'retry after rollback'],
+      ['assistant-text', 'final answer'],
+    ]);
+    expect(skipped['已回退轮次']).toBe(1);
+  });
+
+  // 分页 history_mode 用 item_completed(UserMessage) 代替 legacy user_message
+  test('readSession accepts paginated item_completed UserMessage events', () => {
+    const paged = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-03-${paged}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: paged, id: paged, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai', history_mode: 'paginated' } },
+      {
+        timestamp: TS,
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          thread_id: paged,
+          turn_id: 'turn-1',
+          item: { type: 'UserMessage', id: 'user-1', content: [{ type: 'text', text: 'paginated hello' }] },
+        },
+      },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'paginated reply' }] } },
+    ]);
+    const { title, events } = codex.readSession(projectCwd, paged);
+    expect(title).toBe('paginated hello');
+    expect(events.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'paginated hello'],
+      ['assistant-text', 'paginated reply'],
+    ]);
+    expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === paged)!.title).toBe('paginated hello');
+  });
+
+  test('readSession keeps compacted summary text as a marker', () => {
+    const compacted = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-04-${compacted}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: compacted, id: compacted, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'before compact' } },
+      { timestamp: TS, type: 'compacted', payload: { message: 'earlier work summarized', replacement_history: [] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'after compact' } },
+    ]);
+    const { events } = codex.readSession(projectCwd, compacted);
+    expect(events.map((e: CanonicalEvent) => e.kind)).toEqual(['user', 'marker', 'user']);
+    expect((events[1] as any).text).toContain('earlier work summarized');
+  });
+
   test('writeSession leads with session_meta carrying cwd and originator agent-connect', () => {
     const written = codex.writeSession(projectCwd, 'codex migrated', canonicalEvents);
     // 按返回 id 定位写出的 rollout 文件
