@@ -75,6 +75,8 @@ The session title carries over too: Agent Connect reuses the title the source Ha
 
 A shared canonical event stream sits between a source and target adapter. If the target Harness has no native form for a tool call, Agent Connect keeps the original arguments and result as readable text instead of silently dropping it. A migration always creates a new target session; it never changes the source session.
 
+Pi sessions form a tree of records: retried prompts or `/tree` navigation leave abandoned branches behind. Agent Connect follows Pi's own resume semantics and migrates only the active branch (the path from the last record back to the root via `parentId`); abandoned branches are counted as skipped records in the migration report.
+
 ## Data locations
 
 Agent Connect stores its own migration reports outside your project. It never creates `.agent-connect/` in a project.

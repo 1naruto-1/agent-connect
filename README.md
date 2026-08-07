@@ -139,6 +139,8 @@ Agent Connect 使用中心辐射架构：每个 Harness 提供一个读取器和
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | 支持 | 支持 |
 | Pi | `~/.pi/agent/sessions/--<项目>--/*.jsonl` | 支持 | 支持 |
 
+Pi 会话是一棵记录树：回退重问或 `/tree` 切换会留下被放弃的分支。Agent Connect 与 Pi 原版的恢复判定一致，只迁移活跃分支（从文件最后一条记录沿 `parentId` 回溯到根），被放弃的分支计入迁移报告的跳过统计。
+
 更完整的事件模型、适配器契约和存储说明见 [架构文档](docs/architecture.md)。
 
 ## 数据存储位置

@@ -80,7 +80,7 @@ Every module in `src/adapters/` exports the same operational surface:
 | --- | --- | --- |
 | Claude Code | `~/.claude/projects/*/*.jsonl` | Writes JSONL messages, tool-use/result pairs, and session metadata. |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Writes rollout JSONL; reuses configuration details from a recent native Codex session when available. |
-| Pi | `~/.pi/agent/sessions/--<project>--/*.jsonl` | Writes a session header plus linked message and tool-result records. |
+| Pi | `~/.pi/agent/sessions/--<project>--/*.jsonl` | Sessions are `id`/`parentId` record trees. `pi-session.ts` ports Pi's own `SessionManager` semantics: the reader follows the active branch (last record back to the root), applies v1→v3 format migration in memory only, and treats abandoned branches as skipped records. Compaction and branch summaries become markers. Writes a session header plus a linked record chain. |
 | Cursor | Cursor `state.vscdb` SQLite database | Reads through `bun:sqlite`; writes only new rows after Cursor is fully closed. `cursor-writer.ts` constructs the legacy composer and bubble shapes. |
 
 All adapters generate new target session identifiers. A migration never modifies the source session.
