@@ -135,7 +135,7 @@ describe('renderReport', () => {
   test('includes the skipped stats line when skipped entries exist', () => {
     const stats = analyzeEvents([], { 'file-history-snapshot': 3, queue: 1 });
     const report = renderReport({ ...base, stats });
-    expect(report).toContain('源工具内部状态行');
+    expect(report).toContain('未迁移的源记录');
     expect(report).toContain('file-history-snapshot×3');
     expect(report).toContain('queue×1');
     expect(report).toContain('note-a');
@@ -143,6 +143,6 @@ describe('renderReport', () => {
 
   test('omits the skipped stats line when nothing was skipped', () => {
     const report = renderReport({ ...base, stats: analyzeEvents([]) });
-    expect(report).not.toContain('源工具内部状态行');
+    expect(report).not.toContain('未迁移的源记录');
   });
 });

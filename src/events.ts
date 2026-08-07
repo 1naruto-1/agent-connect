@@ -74,7 +74,7 @@ export function summaryLine(stats: MigrationStats): string {
 export function renderReport(input: { source: string; target: string; title: string; stats: MigrationStats; notes: string[] }): string {
   const lines = [`# 会话迁移报告: ${input.source} → ${input.target}`, '', `- 会话: **${input.title}**`, `- ${summaryLine(input.stats)}`, '', '## 处理说明（默认策略：全量保留，不摘要不丢弃）', ''];
   for (const note of input.notes) lines.push(`- ${note}`);
-  if (Object.keys(input.stats.skipped).length) lines.push(`- 源工具内部状态行（非对话内容，不迁移）：${fmt(input.stats.skipped)}`);
+  if (Object.keys(input.stats.skipped).length) lines.push(`- 未迁移的源记录（内部状态行、非活跃分支等非当前对话内容）：${fmt(input.stats.skipped)}`);
   lines.push('');
   return lines.join('\n');
 }

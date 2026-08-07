@@ -1,56 +1,100 @@
 // Pi 适配器: ~/.pi/agent/sessions/--<路径编码>--/<ts>_<uuid>.jsonl
+// 会话是 JSONL 树 (id/parentId), 读取语义与 Pi 原版 SessionManager 对齐, 核心移植见 pi-session.ts
 // 恢复: pi --resume (选择器) 或 pi --session <id>
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { safeParse, canonicalToolFromName } from '../events.ts';
+import { canonicalToolFromName } from '../events.ts';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
 import { normalizeTitle, titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
+import {
+  PI_SESSION_VERSION, bashExecutionToText, buildSessionPath, generateEntryId,
+  loadSessionEntries, messageActivityTime, migrateSessionEntries, sessionName,
+} from './pi-session.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, ToolEvent, WriteSessionResult } from '../types.ts';
 
 export const id = 'pi';
 export const label = 'Pi';
 
-// pi 的目录编码: `--${cwd 去掉开头斜杠, [/\:] → -}--`
+function expandTilde(value: string): string {
+  if (value === '~') return homeDirectory();
+  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(homeDirectory(), value.slice(2));
+  return value;
+}
+
+// pi 的 getAgentDir: 环境变量 PI_CODING_AGENT_DIR 优先, 默认 ~/.pi/agent
+function agentDir(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  return envDir ? expandTilde(envDir) : path.join(homeDirectory(), '.pi', 'agent');
+}
+
+// pi 的目录编码: `--${resolve(cwd) 去掉开头斜杠, [/\:] → -}--`
+// PI_CODING_AGENT_SESSION_DIR 覆盖整个会话目录 (此时 pi 按 header.cwd 过滤, 见 listSessions)
 function sessionDir(cwd: string): string {
-  const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
-  return path.join(homeDirectory(), '.pi', 'agent', 'sessions', safePath);
+  const envDir = process.env.PI_CODING_AGENT_SESSION_DIR;
+  if (envDir) return expandTilde(envDir);
+  const safePath = `--${path.resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+  return path.join(agentDir(), 'sessions', safePath);
 }
 
 export function available(): boolean {
-  return fs.existsSync(path.join(homeDirectory(), '.pi', 'agent'));
+  return fs.existsSync(agentDir());
 }
-
-const parseLines = (file: string): NativeRecord[] =>
-  fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => safeParse(l)).filter((o): o is NativeRecord => o !== null);
 
 const blockText = (content: unknown): string =>
   typeof content === 'string' ? content : ((content as NativeRecord[]) || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
-// session_info 可在会话中途多次出现, 取最后一个; 没有显式名称时退回首条用户消息
-function sessionTitle(lines: NativeRecord[]): string {
-  const explicit = lines.filter((l) => l.type === 'session_info' && l.name).at(-1)?.name;
-  if (explicit) return normalizeTitle(explicit);
-  for (const l of lines) {
-    if (l.type !== 'message' || l.message?.role !== 'user') continue;
-    const candidate = titleFromMessage(blockText(l.message.content));
+// 活跃分支上第一条可作标题的用户消息 (与 titleFromEvents 的规则一致)
+function firstUserTitle(activePath: NativeRecord[]): string {
+  for (const entry of activePath) {
+    if (entry.type !== 'message' || entry.message?.role !== 'user') continue;
+    const candidate = titleFromMessage(blockText(entry.message.content));
     if (candidate) return candidate;
   }
   return '';
 }
 
+// 标题规则与 readSession 共用: 最新 session_info (空名清除) → 活跃分支首条提问
+function resolveTitle(body: NativeRecord[], activePath: NativeRecord[]): string {
+  const explicit = sessionName(body);
+  return (explicit ? normalizeTitle(explicit) : '') || firstUserTitle(activePath);
+}
+
 export function listSessions(cwd: string): SessionInfo[] {
   const dir = sessionDir(cwd);
   if (!fs.existsSync(dir)) return [];
+  const filterCwd = !!process.env.PI_CODING_AGENT_SESSION_DIR;
+  const resolvedCwd = path.resolve(cwd);
   const sessions: SessionInfo[] = [];
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.jsonl')) continue;
     const file = path.join(dir, f);
-    const lines = parseLines(file);
-    const header = lines.find((l) => l.type === 'session');
-    if (!header) continue;
-    sessions.push({ id: header.id, title: sessionTitle(lines) || '(无标题)', updatedAt: fs.statSync(file).mtimeMs, count: lines.length, file });
+    const entries = loadSessionEntries(file);
+    if (!entries.length) continue;
+    const header = entries[0]!;
+    // 共享会话目录时 pi 只列出 header.cwd 归属当前项目的会话
+    const headerCwd = typeof header.cwd === 'string' ? header.cwd : '';
+    if (filterCwd && (!headerCwd || path.resolve(headerCwd) !== resolvedCwd)) continue;
+    migrateSessionEntries(entries);
+    const body = entries.filter((entry) => entry.type !== 'session');
+
+    // pi 的 buildSessionInfo: messageCount 统计全部消息, modified 取最后一次 user/assistant 活动时间
+    let messageCount = 0;
+    let lastActivity: number | undefined;
+    for (const entry of body) {
+      if (entry.type !== 'message') continue;
+      messageCount++;
+      const activity = messageActivityTime(entry);
+      if (typeof activity === 'number') lastActivity = Math.max(lastActivity ?? 0, activity);
+    }
+    const headerTime = Date.parse(String(header.timestamp || ''));
+    const updatedAt = typeof lastActivity === 'number' && lastActivity > 0
+      ? lastActivity
+      : Number.isNaN(headerTime) ? fs.statSync(file).mtimeMs : headerTime;
+
+    const title = resolveTitle(body, buildSessionPath(body)) || '(无标题)';
+    sessions.push({ id: header.id, title, updatedAt, count: messageCount, file });
   }
   return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -81,32 +125,46 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
     return idPart.toLowerCase().startsWith(wanted);
   });
   if (!file) throw new Error(`未找到 Pi 会话: ${sessionId}`);
-  const lines = parseLines(file);
+  const entries = loadSessionEntries(file);
+  if (!entries.length) throw new Error(`Pi 会话文件无效: ${path.basename(file)}`);
+  migrateSessionEntries(entries);
+  const body = entries.filter((entry) => entry.type !== 'session');
 
-  // toolResult 按 toolCallId 索引
+  // 与 Pi 恢复会话的分支判定一致: leaf 取文件最后一条记录, 沿 parentId 回溯得到活跃分支;
+  // 其余分支 (被 /tree 或回退重问放弃的路径) 不进入事件流, 只计入 skipped
+  const active = buildSessionPath(body);
+  const skipped: Record<string, number> = {};
+  if (active.length < body.length) skipped['非活跃分支'] = body.length - active.length;
+
+  // toolResult 按 toolCallId 索引 (只在活跃分支内配对)
   const results = new Map<string, NativeRecord>();
-  for (const l of lines) {
+  for (const l of active) {
     if (l.type === 'message' && l.message?.role === 'toolResult') results.set(l.message.toolCallId, l.message);
   }
 
   const events: CanonicalEvent[] = [];
-  const skipped: Record<string, number> = {};
-  for (const l of lines) {
+  for (const l of active) {
     const ts = l.timestamp || new Date().toISOString();
-    if (l.type === 'session_info' && l.name) continue;
-    if (l.type === 'compaction') {
-      events.push({ kind: 'marker', ts, text: `[Pi 曾在此处压缩上下文, 摘要: ${String(l.summary || '').slice(0, 200)}]` });
-      continue;
+    switch (l.type) {
+      case 'session_info': // 标题来源, 不进入事件流
+        continue;
+      case 'compaction':
+        // Pi 恢复时用摘要替换更早的历史; 迁移按全量保留策略保留完整活跃分支, 摘要转为标记
+        events.push({ kind: 'marker', ts, text: `[Pi 曾在此处压缩上下文, 摘要: ${String(l.summary || '')}]` });
+        continue;
+      case 'branch_summary':
+        events.push({ kind: 'marker', ts, text: `[Pi 曾从另一分支返回此处, 分支摘要: ${String(l.summary || '')}]` });
+        continue;
+      case 'custom_message':
+        events.push({ kind: 'marker', ts, text: blockText(l.content) });
+        continue;
+      case 'message':
+        break;
+      default: // thinking_level_change / model_change / custom / label 等状态行
+        skipped[l.type] = (skipped[l.type] || 0) + 1;
+        continue;
     }
-    if (l.type === 'custom_message') {
-      events.push({ kind: 'marker', ts, text: blockText(l.content) });
-      continue;
-    }
-    if (l.type !== 'message') {
-      if (l.type !== 'session') skipped[l.type] = (skipped[l.type] || 0) + 1;
-      continue;
-    }
-    const m = l.message;
+    const m = l.message || {};
     if (m.role === 'user') {
       events.push({ kind: 'user', ts, text: blockText(m.content) });
     } else if (m.role === 'assistant') {
@@ -120,10 +178,18 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
           events.push({ kind: 'tool', ts, tool, input, output: r ? blockText(r.content) : '', isError: r?.isError || false, origName: b.name });
         }
       }
+    } else if (m.role === 'bashExecution') {
+      // 用户的 ! 命令; !! 前缀被 pi 排除出上下文, 迁移同样跳过
+      if (m.excludeFromContext) { skipped['bashExecution(!!)'] = (skipped['bashExecution(!!)'] || 0) + 1; continue; }
+      events.push({ kind: 'user', ts, text: bashExecutionToText(m) });
+    } else if (m.role === 'custom') {
+      // 扩展注入的消息, pi 会作为用户消息进入上下文; 迁移保留为标记
+      events.push({ kind: 'marker', ts, text: blockText(m.content) });
+    } else if (m.role !== 'toolResult') { // toolResult 已合并
+      skipped[`message(${m.role})`] = (skipped[`message(${m.role})`] || 0) + 1;
     }
-    // toolResult 已合并
   }
-  return { title: sessionTitle(lines) || titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
+  return { title: resolveTitle(body, active) || titleFromEvents(events) || untitledSession(label, sessionId), events, skipped };
 }
 
 // ---- 写入 ----
@@ -163,15 +229,18 @@ export function writeSession(cwd: string, title: string, events: CanonicalEvent[
   const sessionId = uuidV7(now.getTime());
   const iso = now.toISOString();
   const lines: NativeRecord[] = [];
+  const usedIds = new Set<string>();
   let lastId: string | null = null;
   const entry = (obj: NativeRecord, ts: string) => {
-    const id = randomUUID().slice(0, 8);
-    lines.push({ ...obj, id, parentId: lastId, timestamp: ts });
-    lastId = id;
+    const entryId = generateEntryId(usedIds);
+    usedIds.add(entryId);
+    lines.push({ ...obj, id: entryId, parentId: lastId, timestamp: ts });
+    lastId = entryId;
   };
 
-  lines.push({ type: 'session', version: 3, id: sessionId, timestamp: iso, cwd });
-  entry({ type: 'session_info', name: title }, iso);
+  lines.push({ type: 'session', version: PI_SESSION_VERSION, id: sessionId, timestamp: iso, cwd: path.resolve(cwd) });
+  // pi 的 appendSessionInfo 会清洗换行
+  entry({ type: 'session_info', name: title.replace(/[\r\n]+/g, ' ').trim() }, iso);
 
   const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
   const assistant = (content: NativeRecord[], ts: string, stopReason = 'stop') => entry({

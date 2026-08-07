@@ -266,6 +266,90 @@ describe('pi adapter', () => {
     expect(() => pi.readSession(path.join(tempHome, 'nope', 'missing'), sessionId)).toThrow(/未找到 Pi 会话/);
   });
 
+  // 会话是 id/parentId 树; 与 Pi 原版一致, 只迁移"文件最后一条记录回溯到根"的活跃分支
+  test('readSession follows the active branch from the last entry and skips abandoned branches', () => {
+    const branched = randomUUID();
+    writeJsonl(path.join(sessionDir, `2026-07-26T10-00-02-000Z_${branched}.jsonl`), [
+      { type: 'session', version: 3, id: branched, timestamp: TS, cwd: projectCwd },
+      { type: 'message', id: 'e1', parentId: null, timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'first question' }] } },
+      { type: 'message', id: 'e2', parentId: 'e1', timestamp: TS, message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'first answer' }] } },
+      // 被放弃的分支 (用户回退重问前的旧路径)
+      { type: 'message', id: 'e3', parentId: 'e2', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'abandoned question' }] } },
+      { type: 'message', id: 'e4', parentId: 'e3', timestamp: TS, message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'abandoned answer' }] } },
+      // 新分支从 e2 分叉, 文件末尾即当前 leaf
+      { type: 'message', id: 'e5', parentId: 'e2', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'retried question' }] } },
+      { type: 'message', id: 'e6', parentId: 'e5', timestamp: TS, message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'final answer' }] } },
+    ]);
+    const { events, skipped } = pi.readSession(projectCwd, branched);
+    expect(events.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'first question'],
+      ['assistant-text', 'first answer'],
+      ['user', 'retried question'],
+      ['assistant-text', 'final answer'],
+    ]);
+    expect(skipped['非活跃分支']).toBe(2);
+  });
+
+  test('readSession keeps branch_summary entries as markers on the active branch', () => {
+    const summarized = randomUUID();
+    writeJsonl(path.join(sessionDir, `2026-07-26T10-00-03-000Z_${summarized}.jsonl`), [
+      { type: 'session', version: 3, id: summarized, timestamp: TS, cwd: projectCwd },
+      { type: 'message', id: 'e1', parentId: null, timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'start' }] } },
+      // /tree 切换分支时 pi 在切换点写入被放弃分支的摘要
+      { type: 'branch_summary', id: 'e2', parentId: 'e1', timestamp: TS, fromId: 'e1', summary: 'explored an idea that did not work' },
+      { type: 'message', id: 'e3', parentId: 'e2', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'continue here' }] } },
+    ]);
+    const { events } = pi.readSession(projectCwd, summarized);
+    expect(events.map((e: CanonicalEvent) => e.kind)).toEqual(['user', 'marker', 'user']);
+    expect((events[1] as any).text).toContain('explored an idea that did not work');
+  });
+
+  // v1 会话没有 version 与 id/parentId; 与 pi 一致, 在内存中补链后按线性顺序读取 (不改写源文件)
+  test('readSession migrates v1 sessions in memory without touching the source file', () => {
+    const legacy = randomUUID();
+    const file = path.join(sessionDir, `2026-07-26T10-00-04-000Z_${legacy}.jsonl`);
+    writeJsonl(file, [
+      { type: 'session', id: legacy, timestamp: TS, cwd: projectCwd },
+      { type: 'message', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'legacy question' }] } },
+      { type: 'message', timestamp: TS, message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'legacy answer' }] } },
+    ]);
+    const before = fs.readFileSync(file, 'utf8');
+    const { events } = pi.readSession(projectCwd, legacy);
+    expect(events.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'legacy question'],
+      ['assistant-text', 'legacy answer'],
+    ]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(before); // 迁移不得修改源会话
+  });
+
+  // pi 的 ! 命令以 bashExecution 角色入库, 进入上下文的文本形态与 pi 的 convertToLlm 相同
+  test('readSession renders bashExecution messages like pi does and honors the !! exclusion', () => {
+    const bashed = randomUUID();
+    writeJsonl(path.join(sessionDir, `2026-07-26T10-00-05-000Z_${bashed}.jsonl`), [
+      { type: 'session', version: 3, id: bashed, timestamp: TS, cwd: projectCwd },
+      { type: 'message', id: 'e1', parentId: null, timestamp: TS, message: { role: 'bashExecution', command: 'git status', output: 'clean', exitCode: 0, cancelled: false, truncated: false, timestamp: 0 } },
+      { type: 'message', id: 'e2', parentId: 'e1', timestamp: TS, message: { role: 'bashExecution', command: 'secret', output: 'hidden', exitCode: 0, cancelled: false, truncated: false, timestamp: 0, excludeFromContext: true } },
+    ]);
+    const { events, skipped } = pi.readSession(projectCwd, bashed);
+    expect(events.length).toBe(1);
+    expect((events[0] as any).text).toContain('Ran `git status`');
+    expect((events[0] as any).text).toContain('clean');
+    expect(skipped['bashExecution(!!)']).toBe(1);
+  });
+
+  // 与 pi 的 getSessionName 一致: 最新 session_info 生效, 空名是显式清除
+  test('readSession treats an empty latest session_info as an explicit title clear', () => {
+    const cleared = randomUUID();
+    writeJsonl(path.join(sessionDir, `2026-07-26T10-00-06-000Z_${cleared}.jsonl`), [
+      { type: 'session', version: 3, id: cleared, timestamp: TS, cwd: projectCwd },
+      { type: 'session_info', name: 'old name', id: 'e1', parentId: null, timestamp: TS },
+      { type: 'message', id: 'e2', parentId: 'e1', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: 'fallback prompt' }] } },
+      { type: 'session_info', name: '', id: 'e3', parentId: 'e2', timestamp: TS },
+    ]);
+    expect(pi.readSession(projectCwd, cleared).title).toBe('fallback prompt');
+    expect(pi.listSessions(projectCwd).find((s: { id: string }) => s.id === cleared)!.title).toBe('fallback prompt');
+  });
+
   test('writeSession leads with a v3 session header and keeps the parentId chain consistent', () => {
     const written = pi.writeSession(projectCwd, 'pi migrated', canonicalEvents);
     const file = fs.readdirSync(sessionDir).map((f) => path.join(sessionDir, f)).find((f) => f.endsWith(`_${written.id}.jsonl`));
