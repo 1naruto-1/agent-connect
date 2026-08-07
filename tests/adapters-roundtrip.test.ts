@@ -18,6 +18,7 @@ const claude = await import('../src/adapters/claude.ts');
 const codex = await import('../src/adapters/codex.ts');
 const pi = await import('../src/adapters/pi.ts');
 const { buildSessionPath } = await import('../src/adapters/pi-session.ts');
+const { applyThreadRollbacks, userTurnBoundaries } = await import('../src/adapters/codex-session.ts');
 
 const restoreEnv = (key: 'HOME' | 'USERPROFILE', value: string | undefined): void => {
   if (value === undefined) delete process.env[key];
@@ -435,6 +436,91 @@ describe('codex adapter', () => {
       ['assistant-text', 'paginated reply'],
     ]);
     expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === paged)!.title).toBe('paginated hello');
+  });
+
+  test('readSession surfaces response-only users and inter-agent communications', () => {
+    const nativeOnly = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-05-${nativeOnly}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: nativeOnly, id: nativeOnly, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'response-only prompt' }] } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'response-only answer' }] } },
+      { timestamp: TS, type: 'inter_agent_communication', payload: { author: 'agent-a', recipient: 'agent-b', content: 'delegated work', trigger_turn: true } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'delegated answer' }] } },
+    ]);
+    const { title, events, skipped } = codex.readSession(projectCwd, nativeOnly);
+    expect(title).toBe('response-only prompt');
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'response-only prompt'],
+      ['assistant-text', 'response-only answer'],
+      ['marker', '[Codex agent communication]\ndelegated work'],
+      ['assistant-text', 'delegated answer'],
+    ]);
+    expect(skipped['注入消息(user)']).toBeUndefined();
+  });
+
+  test('rollback ignores malformed num_turns and deduplicates dual-track user turns', () => {
+    const eventUser = { type: 'event_msg', payload: { type: 'user_message', message: 'visible user' } };
+    const responseUser = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible user' }] } };
+    const assistant = { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } };
+    expect(userTurnBoundaries([eventUser, responseUser, assistant]).map((b) => [b.index, b.kind])).toEqual([[0, 'event']]);
+
+    for (const numTurns of ['1', true, 1.5, -1, 0, null, 0x1_0000_0000]) {
+      const result = applyThreadRollbacks([eventUser, responseUser, assistant, { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: numTurns } }]);
+      expect(result.lines.length).toBe(3);
+      expect(result.rolledBackTurns).toBe(0);
+      expect(result.rolledBackLines).toBe(0);
+    }
+
+    const contextual = applyThreadRollbacks([
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>cwd</environment_context>' }] } },
+      assistant,
+      { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+    ]);
+    expect(contextual.lines.length).toBe(2);
+    expect(contextual.rolledBackTurns).toBe(0);
+
+    const responseOnly = applyThreadRollbacks([
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'response only' }] } },
+      assistant,
+      { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+    ]);
+    expect(responseOnly.lines).toEqual([]);
+    expect(responseOnly.rolledBackTurns).toBe(1);
+    expect(responseOnly.rolledBackLines).toBe(2);
+
+    const interAgent = applyThreadRollbacks([
+      { type: 'inter_agent_communication', payload: { content: 'delegate this', trigger_turn: true } },
+      assistant,
+      { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+    ]);
+    expect(interAgent.lines).toEqual([]);
+    expect(interAgent.rolledBackTurns).toBe(1);
+  });
+
+  test('rollback handles paginated turns, multiple rollbacks, and compaction markers', () => {
+    const pagedUser = (text: string) => ({
+      type: 'event_msg',
+      payload: { type: 'item_completed', item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] } },
+    });
+    const legacyUser = (text: string) => ({ type: 'event_msg', payload: { type: 'user_message', message: text } });
+    const answer = (text: string) => ({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } });
+    const rollback = (num_turns: number) => ({ type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns } });
+    const compacted = { type: 'compacted', payload: { message: 'summary marker', replacement_history: [] } };
+    const result = applyThreadRollbacks([
+      legacyUser('first'), answer('first answer'),
+      pagedUser('second'), answer('second answer'), rollback(1),
+      legacyUser('retry'), answer('retry answer'), compacted,
+      pagedUser('latest'), answer('latest answer'), rollback(1),
+    ]);
+    expect(result.lines.map((line) => {
+      if (line.type === 'compacted') return 'compacted';
+      if (line.payload?.type === 'message') return line.payload.content?.[0]?.text;
+      return line.payload?.message || line.payload?.item?.content?.[0]?.text || line.payload?.type;
+    })).toEqual([
+      'first', 'first answer', 'retry', 'retry answer', 'compacted',
+    ]);
+    expect(result.rolledBackTurns).toBe(2);
+    expect(result.rolledBackLines).toBe(4);
   });
 
   test('readSession keeps compacted summary text as a marker', () => {

@@ -9,7 +9,9 @@ import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
 import { titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
 import {
-  compactedMessage, effectiveRolloutLines, isUserMessageEvent, loadRolloutLines, userMessageText,
+  compactedMessage, effectiveRolloutLines, interAgentMessageText, isInterAgentCommunication,
+  isResponseUserMessage, isUserMessageEvent, loadRolloutLines, responseUserMessageText,
+  userMessageText, userTurnBoundaries,
 } from './codex-session.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
@@ -116,6 +118,11 @@ export function readSession(_cwd: string, sessionId: string): ReadSessionResult 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
   if (rolledBackTurns > 0) skipped['已回退轮次'] = rolledBackTurns;
+  const responseOnlyUsers = new Set(
+    userTurnBoundaries(lines)
+      .filter((boundary) => boundary.kind === 'response')
+      .map((boundary) => boundary.line),
+  );
 
   // 先收集工具输出 (call_id → output); 只在有效历史上配对
   const outputs = new Map<string, string>();
@@ -131,11 +138,19 @@ export function readSession(_cwd: string, sessionId: string): ReadSessionResult 
     const p = l.payload;
     if (isUserMessageEvent(l)) {
       events.push({ kind: 'user', ts, text: userMessageText(p || {}) });
+    } else if (isInterAgentCommunication(l)) {
+      const text = interAgentMessageText(l);
+      events.push({ kind: 'marker', ts, text: text ? `[Codex agent communication]\n${text}` : '[Codex agent communication]' });
+    } else if (isResponseUserMessage(l)) {
+      if (responseOnlyUsers.has(l)) {
+        events.push({ kind: 'user', ts, text: responseUserMessageText(l) });
+      } else {
+        skipped['注入消息(user)'] = (skipped['注入消息(user)'] || 0) + 1;
+      }
     } else if (l.type === 'response_item') {
       switch (p?.type) {
         case 'message':
           if (p.role === 'assistant') events.push({ kind: 'assistant-text', ts, text: itemText(p.content) });
-          // role user 的 response_item 是注入的环境上下文, user_message 事件已覆盖真实输入
           else skipped[`注入消息(${p.role})`] = (skipped[`注入消息(${p.role})`] || 0) + 1;
           break;
         case 'reasoning': {

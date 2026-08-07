@@ -1,9 +1,8 @@
 // Codex rollout 接续语义, 对齐 openai/codex resume 的「丢弃已回退轮次」结果:
 // - 参考 core/src/session/rollout_reconstruction.rs / thread_rollout_truncation.rs /
 //   app-server-protocol/.../thread_history.rs 的 ThreadRolledBack 行为
-// - 切点按本适配器的展示解析: event_msg.user_message / item_completed(UserMessage)
-//   (上游 truncation 以 ResponseItem→TurnItem::UserMessage 为边界; 本读取器把
-//   response_item role=user 视为注入上下文并跳过, 故用 event_msg 切以免留下孤儿用户行)
+// - legacy / paginated event_msg 是首选展示边界; 缺失时回退到非上下文
+//   ResponseItem::UserMessage 或 inter_agent_communication, 并去重双轨用户记录
 //
 // Rollout 是追加式 JSONL: 回退会追加 event_msg.thread_rolled_back, 压缩会追加 type=compacted。
 // 迁移只加载回退后的有效历史, 不得改写源文件。
@@ -57,6 +56,94 @@ export function userMessageText(payload: NativeRecord): string {
   return '';
 }
 
+export interface UserTurnBoundary {
+  index: number;
+  line: NativeRecord;
+  kind: 'event' | 'response' | 'inter-agent';
+}
+
+const CONTEXTUAL_USER_PREFIXES = [
+  '<user_instructions', '<environment_context', '<additional_context', '<skill',
+  '<user_shell_command', '<turn_aborted', '<subagent_notification', '<internal_model_context',
+  '<recommended_plugins', '<local-command-caveat', '<system-reminder', '<hook_prompt',
+  '<permissions instructions', '<model_switch', '<apps_instructions', '<collaboration_mode',
+  '<multi_agent_mode', '<environments_instructions', '<git_attribution', '<plugins_instructions',
+  '<realtime_conversation', '<skills_instructions', '<tools', '<personality_spec',
+  '<token_budget', '<context_window', '<rollout_budget',
+];
+
+export function isResponseUserMessage(line: NativeRecord): boolean {
+  return line.type === 'response_item'
+    && line.payload?.type === 'message'
+    && line.payload?.role === 'user';
+}
+
+export function responseUserMessageText(line: NativeRecord): string {
+  if (!isResponseUserMessage(line) || !Array.isArray(line.payload.content)) return '';
+  return line.payload.content.map((part: NativeRecord) => {
+    if (typeof part === 'string') return part;
+    return part && typeof part.text === 'string' ? part.text : '';
+  }).join('');
+}
+
+function isContextualResponseUser(line: NativeRecord): boolean {
+  if (!isResponseUserMessage(line) || !Array.isArray(line.payload.content)) return false;
+  return line.payload.content.some((part: NativeRecord) => {
+    if (!part || typeof part !== 'object' || typeof part.text !== 'string') return false;
+    const text = part.text.trimStart().toLowerCase();
+    return CONTEXTUAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix));
+  });
+}
+
+export function isInterAgentCommunication(line: NativeRecord): boolean {
+  return line.type === 'inter_agent_communication'
+    && !!line.payload
+    && typeof line.payload === 'object';
+}
+
+export function interAgentMessageText(line: NativeRecord): string {
+  return isInterAgentCommunication(line) ? String(line.payload.content ?? '').trim() : '';
+}
+
+function closesPendingEventTwin(line: NativeRecord): boolean {
+  if (line.type === 'response_item') return true;
+  if (line.type === 'compacted' || isThreadRolledBack(line)) return true;
+  if (line.type !== 'event_msg') return false;
+  return ['agent_message', 'agent_reasoning', 'item_completed', 'turn_started', 'turn_complete', 'turn_aborted']
+    .includes(String(line.payload?.type || ''));
+}
+
+// 识别真实用户轮次并去重 event_msg + response_item 双轨记录。
+export function userTurnBoundaries(lines: NativeRecord[]): UserTurnBoundary[] {
+  const boundaries: UserTurnBoundary[] = [];
+  let pendingEventTwin = false;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (isUserMessageEvent(line)) {
+      boundaries.push({ index, line, kind: 'event' });
+      pendingEventTwin = true;
+      continue;
+    }
+    if (isResponseUserMessage(line)) {
+      if (isContextualResponseUser(line)) continue;
+      if (pendingEventTwin) {
+        pendingEventTwin = false;
+        continue;
+      }
+      boundaries.push({ index, line, kind: 'response' });
+      continue;
+    }
+    if (isInterAgentCommunication(line)) {
+      boundaries.push({ index, line, kind: 'inter-agent' });
+      pendingEventTwin = false;
+      continue;
+    }
+    if (pendingEventTwin && closesPendingEventTwin(line)) pendingEventTwin = false;
+  }
+  return boundaries;
+}
+
 export function isThreadRolledBack(line: NativeRecord): boolean {
   return line.type === 'event_msg' && line.payload?.type === 'thread_rolled_back';
 }
@@ -67,26 +154,29 @@ export function compactedMessage(line: NativeRecord): string {
   return String(payload.message ?? '').trim();
 }
 
-// 对齐 drop_last_n_user_turns 的结果, 切点用 event_msg 用户边界 (见文件头说明):
-// 正向扫描; 遇到 thread_rolled_back(n) 时, 从「倒数第 n 个 event_msg 用户消息」起截断有效前缀。
+// 正向扫描; 每个 rollback 都作用于当前有效前缀的真实用户轮次。
 export function applyThreadRollbacks(lines: NativeRecord[]): EffectiveRollout {
   const effective: NativeRecord[] = [];
+  let rolledBackLines = 0;
   let rolledBackTurns = 0;
 
   for (const line of lines) {
     if (isThreadRolledBack(line)) {
-      const raw = Number(line.payload?.num_turns ?? 0);
-      const numTurns = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+      const raw = line.payload?.num_turns;
+      const numTurns = typeof raw === 'number'
+        && Number.isInteger(raw)
+        && raw > 0
+        && raw <= 0xffff_ffff
+        ? raw
+        : 0;
       if (numTurns === 0) continue;
 
-      const userStarts: number[] = [];
-      for (let i = 0; i < effective.length; i++) {
-        if (isUserMessageEvent(effective[i]!)) userStarts.push(i);
-      }
-      if (userStarts.length === 0) continue;
+      const boundaries = userTurnBoundaries(effective);
+      if (boundaries.length === 0) continue;
 
-      const dropCount = Math.min(numTurns, userStarts.length);
-      const cutIdx = userStarts[userStarts.length - dropCount]!;
+      const dropCount = Math.min(numTurns, boundaries.length);
+      const cutIdx = boundaries[boundaries.length - dropCount]!.index;
+      rolledBackLines += effective.length - cutIdx;
       effective.length = cutIdx;
       rolledBackTurns += dropCount;
       continue;
@@ -94,11 +184,7 @@ export function applyThreadRollbacks(lines: NativeRecord[]): EffectiveRollout {
     effective.push(line);
   }
 
-  return {
-    lines: effective,
-    rolledBackLines: Math.max(0, lines.length - effective.length),
-    rolledBackTurns,
-  };
+  return { lines: effective, rolledBackLines, rolledBackTurns };
 }
 
 // 有效 rollout: 应用 ThreadRolledBack; 压缩仍保留全文 + marker (迁移全量策略, 异于 resume 替换历史)
