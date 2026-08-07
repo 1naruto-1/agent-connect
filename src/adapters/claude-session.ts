@@ -44,11 +44,10 @@ export function loadTranscriptEntries(file: string): NativeRecord[] {
 }
 
 function messageTimestamp(msg: NativeRecord): number {
-  const t = Date.parse(String(msg.timestamp || ''));
-  return Number.isFinite(t) ? t : -Infinity;
+  return Date.parse(String(msg.timestamp || ''));
 }
 
-// 找时间戳最新且满足谓词的消息; 时间相同则保留后出现者 (贴近 JSONL 追加顺序)
+// 找时间戳最新且满足谓词的消息; 时间相同保留先出现者 (与 Claude loader 一致)
 function findLatestMessage(
   messages: Iterable<NativeRecord>,
   predicate: (m: NativeRecord) => boolean,
@@ -58,7 +57,7 @@ function findLatestMessage(
   for (const m of messages) {
     if (!predicate(m)) continue;
     const t = messageTimestamp(m);
-    if (t >= maxTime) {
+    if (t > maxTime) {
       maxTime = t;
       latest = m;
     }

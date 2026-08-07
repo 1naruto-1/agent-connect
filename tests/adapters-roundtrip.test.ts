@@ -134,6 +134,31 @@ describe('claude adapter', () => {
     expect(tool.tool).toBe('terminal');
     expect(tool.input.command).toBe('echo hi');
     expect(tool.output).toBe('hi');
+
+    // Claude loader 在时间相同时选首条记录; 写入端必须让每条 transcript 记录严格递增。
+    const transcript = readJsonl(path.join(sessionDir, `${written.id}.jsonl`)).filter((line) => typeof line.uuid === 'string');
+    for (let i = 1; i < transcript.length; i++) {
+      expect(Date.parse(transcript[i]!.timestamp)).toBeGreaterThan(Date.parse(transcript[i - 1]!.timestamp));
+    }
+    let nativeLeaf = transcript[0]!;
+    for (const line of transcript.slice(1)) {
+      if (Date.parse(line.timestamp) > Date.parse(nativeLeaf.timestamp)) nativeLeaf = line;
+    }
+    expect(nativeLeaf.uuid).toBe(transcript[transcript.length - 1]!.uuid);
+  });
+
+  test('readSession keeps the first record when timestamps tie, as Claude does', () => {
+    const tied = randomUUID();
+    const u1 = randomUUID(), a1 = randomUUID(), u2 = randomUUID();
+    writeJsonl(path.join(sessionDir, `${tied}.jsonl`), [
+      { type: 'user', uuid: u1, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'first question' } },
+      { type: 'assistant', uuid: a1, parentUuid: u1, isSidechain: false, timestamp: TS, message: { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] } },
+      { type: 'user', uuid: u2, parentUuid: a1, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'later question' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, tied);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'first question'],
+    ]);
   });
 
   // JSONL 是 parentUuid 树; 与 Claude --resume 一致, 只迁移「最近非 sidechain leaf → 根」的活跃链

@@ -188,6 +188,15 @@ export function writeSession(cwd: string, title: string, events: CanonicalEvent[
   const lines: NativeRecord[] = [];
   let lastUuid: string | null = null;
   let lastUserText = '';
+  // Claude resume chooses the first record for equal timestamps. Canonical events
+  // can legitimately share a timestamp, so make persisted transcript records strictly ordered.
+  let lastTimestamp = -Infinity;
+  const nextTimestamp = (sourceTs: string): string => {
+    const parsed = Date.parse(sourceTs);
+    const timestamp = Math.max(Number.isFinite(parsed) ? parsed : Date.now(), lastTimestamp + 1);
+    lastTimestamp = timestamp;
+    return new Date(timestamp).toISOString();
+  };
 
   const env = (uuid: string, ts: string) => ({
     parentUuid: lastUuid, isSidechain: false, uuid, timestamp: ts,
@@ -219,25 +228,26 @@ export function writeSession(cwd: string, title: string, events: CanonicalEvent[
   for (const e of events) {
     switch (e.kind) {
       case 'user':
-        emitUser(e.text, e.ts);
+        emitUser(e.text, nextTimestamp(e.ts));
         lastUserText = e.text;
         break;
       case 'assistant-text':
-        emitAssistant([{ type: 'text', text: e.text }], e.ts, 'end_turn');
+        emitAssistant([{ type: 'text', text: e.text }], nextTimestamp(e.ts), 'end_turn');
         break;
       case 'thinking':
-        emitAssistant([{ type: 'thinking', thinking: e.text, signature: e.signature || '' }], e.ts, null);
+        emitAssistant([{ type: 'thinking', thinking: e.text, signature: e.signature || '' }], nextTimestamp(e.ts), null);
         break;
       case 'marker':
-        emitUser([{ type: 'text', text: e.text }], e.ts, { isMeta: true });
+        emitUser([{ type: 'text', text: e.text }], nextTimestamp(e.ts), { isMeta: true });
         break;
       case 'tool': {
         const { name, input } = fromCanonicalTool(e);
         const toolId = `toolu_migrated_${randomUUID().slice(0, 8)}`;
-        const assistantUuid = emitAssistant([{ type: 'tool_use', id: toolId, name, input }], e.ts, 'tool_use');
+        const toolTs = nextTimestamp(e.ts);
+        const assistantUuid = emitAssistant([{ type: 'tool_use', id: toolId, name, input }], toolTs, 'tool_use');
         const uuid = randomUUID();
         lines.push({
-          ...env(uuid, e.ts), type: 'user',
+          ...env(uuid, nextTimestamp(e.ts)), type: 'user',
           message: { role: 'user', content: [{ tool_use_id: toolId, type: 'tool_result', content: e.output ?? '', is_error: !!e.isError }] },
           sourceToolAssistantUUID: assistantUuid,
         });
@@ -261,5 +271,6 @@ export function writeSession(cwd: string, title: string, events: CanonicalEvent[
 
 export const writeNotes = [
   '思考块原样保留为 thinking 块 (API 忽略历史轮次 thinking, 不影响恢复)',
+  '并列或倒序的事件时间会按记录顺序递增 1ms，确保 Claude Code 从最后一条记录续接',
   'MCP 调用保留完整记录 (目标端未配置同名 MCP 服务器时不可重新调用)',
 ];
