@@ -189,6 +189,7 @@ describe('claude adapter', () => {
     expect((events[1] as any).text).toBe('after compact');
   });
 
+  // snip 在构建活跃链之前应用; 完整流水线顺序是 compact relink → snip (见 effectiveTranscript)
   test('readSession applies snipMetadata removals before building the chain', () => {
     const snipped = randomUUID();
     const u1 = randomUUID(), a1 = randomUUID(), u2 = randomUUID(), a2 = randomUUID(), u3 = randomUUID(), boundary = randomUUID();
@@ -210,6 +211,44 @@ describe('claude adapter', () => {
       ['user', 'after snip'],
     ]);
     expect(skipped['已裁剪消息']).toBe(2);
+  });
+
+  // compact 必须先于 snip: 若先 snip 掉 preserved head, compact 无法走通保留段, 会提前返回并留下应被剪掉的旧消息
+  test('readSession applies preservedSegment compact before snip when both are present', () => {
+    const mixed = randomUUID();
+    const uAnchor = randomUUID(), uOld = randomUUID(), uHead = randomUUID(), aTail = randomUUID();
+    const compactBoundary = randomUUID(), uAfter = randomUUID(), uFinal = randomUUID(), snipBoundary = randomUUID();
+    writeJsonl(path.join(sessionDir, `${mixed}.jsonl`), [
+      { type: 'user', uuid: uAnchor, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'anchor keep' } },
+      { type: 'user', uuid: uOld, parentUuid: uAnchor, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'should be pruned by compact' } },
+      { type: 'user', uuid: uHead, parentUuid: uOld, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: aTail, parentUuid: uHead, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: compactBoundary, parentUuid: aTail, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: {
+          trigger: 'manual', preTokens: 2000, messagesSummarized: 1,
+          preservedSegment: { headUuid: uHead, tailUuid: aTail, anchorUuid: uAnchor },
+        },
+      },
+      { type: 'user', uuid: uAfter, parentUuid: compactBoundary, isSidechain: false, timestamp: '2026-07-26T10:00:05.000Z', message: { role: 'user', content: 'after compact' } },
+      { type: 'user', uuid: uFinal, parentUuid: uAfter, isSidechain: false, timestamp: '2026-07-26T10:00:06.000Z', message: { role: 'user', content: 'after snip' } },
+      {
+        type: 'system', uuid: snipBoundary, parentUuid: uFinal, isSidechain: false, timestamp: '2026-07-26T10:00:07.000Z',
+        subtype: 'snip_boundary', snipMetadata: { removedUuids: [uHead] },
+      },
+    ]);
+    const { events, skipped } = claude.readSession(projectCwd, mixed);
+    // compact 剪掉 uOld; 随后 snip 去掉 preserved head; tail 仍在链上
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['assistant-text', 'preserved tail'],
+      ['marker', '[Claude Code 曾在此处压缩上下文, 约 1 条消息]'],
+      ['user', 'after compact'],
+      ['user', 'after snip'],
+    ]);
+    expect(skipped['已裁剪消息']).toBe(1);
+    expect(events.some((e: CanonicalEvent) => (e as any).text === 'should be pruned by compact')).toBe(false);
+    expect(events.some((e: CanonicalEvent) => (e as any).text === 'preserved head')).toBe(false);
   });
 });
 
@@ -264,17 +303,20 @@ describe('codex adapter', () => {
     expect(title).toBe('list files please');
   });
 
-  // 与 Codex resume 一致: thread_rolled_back 丢弃最近 N 个用户轮次, 被回退内容不迁移
+  // 与 Codex resume 一致丢弃已回退轮次; 切点用 event_msg (双轨里的 response_item role=user 不计入边界)
   test('readSession drops turns removed by thread_rolled_back', () => {
     const rolled = randomUUID();
     writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-02-${rolled}.jsonl`), [
       { timestamp: TS, type: 'session_meta', payload: { session_id: rolled, id: rolled, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
       { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'keep this turn' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'keep this turn' }] } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'kept answer' }] } },
       { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'abandon this turn' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'abandon this turn' }] } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'abandoned answer' }] } },
       { timestamp: TS, type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
       { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'retry after rollback' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'retry after rollback' }] } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final answer' }] } },
     ]);
     const { events, skipped } = codex.readSession(projectCwd, rolled);
@@ -285,6 +327,7 @@ describe('codex adapter', () => {
       ['assistant-text', 'final answer'],
     ]);
     expect(skipped['已回退轮次']).toBe(1);
+    expect(skipped['注入消息(user)']).toBe(2); // 保留轮次与重试轮次各一条; 被回退轮次的注入行已随截断消失
   });
 
   // 分页 history_mode 用 item_completed(UserMessage) 代替 legacy user_message

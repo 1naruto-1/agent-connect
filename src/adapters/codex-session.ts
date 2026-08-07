@@ -1,10 +1,12 @@
-// Codex rollout 接续语义, 移植自 openai/codex:
-// - core/src/session/rollout_reconstruction.rs (resume 重建历史)
-// - core/src/thread_rollout_truncation.rs (ThreadRolledBack 对用户轮次的截断)
-// - app-server-protocol/.../thread_history.rs (UI 侧同样丢弃被回退的 turn)
+// Codex rollout 接续语义, 对齐 openai/codex resume 的「丢弃已回退轮次」结果:
+// - 参考 core/src/session/rollout_reconstruction.rs / thread_rollout_truncation.rs /
+//   app-server-protocol/.../thread_history.rs 的 ThreadRolledBack 行为
+// - 切点按本适配器的展示解析: event_msg.user_message / item_completed(UserMessage)
+//   (上游 truncation 以 ResponseItem→TurnItem::UserMessage 为边界; 本读取器把
+//   response_item role=user 视为注入上下文并跳过, 故用 event_msg 切以免留下孤儿用户行)
 //
 // Rollout 是追加式 JSONL: 回退会追加 event_msg.thread_rolled_back, 压缩会追加 type=compacted。
-// Codex resume 只加载回退后的有效历史; 迁移工具对齐该判定, 不得改写源文件。
+// 迁移只加载回退后的有效历史, 不得改写源文件。
 import fs from 'node:fs';
 import { safeParse } from '../events.ts';
 import type { NativeRecord } from '../types.ts';
@@ -31,7 +33,7 @@ function isUserMessageItem(item: unknown): item is NativeRecord {
   return !!item && typeof item === 'object' && (item as NativeRecord).type === 'UserMessage';
 }
 
-// 用户轮次边界: 与 Codex list/resume 一致, 同时认 legacy user_message 与分页 item_completed
+// 用户轮次边界 (适配器对齐): legacy user_message 与分页 item_completed(UserMessage)
 export function isUserMessageEvent(line: NativeRecord): boolean {
   if (line.type !== 'event_msg') return false;
   const p = line.payload;
@@ -65,9 +67,8 @@ export function compactedMessage(line: NativeRecord): string {
   return String(payload.message ?? '').trim();
 }
 
-// 移植 user_message_positions_in_rollout + drop_last_n_user_turns 的行级等价物:
-// 正向扫描; 遇到 thread_rolled_back(n) 时, 从「倒数第 n 个用户消息」起截断有效前缀。
-// 用户边界用 event_msg (user_message / item_completed), 与本适配器的展示解析一致。
+// 对齐 drop_last_n_user_turns 的结果, 切点用 event_msg 用户边界 (见文件头说明):
+// 正向扫描; 遇到 thread_rolled_back(n) 时, 从「倒数第 n 个 event_msg 用户消息」起截断有效前缀。
 export function applyThreadRollbacks(lines: NativeRecord[]): EffectiveRollout {
   const effective: NativeRecord[] = [];
   let rolledBackTurns = 0;
@@ -100,7 +101,7 @@ export function applyThreadRollbacks(lines: NativeRecord[]): EffectiveRollout {
   };
 }
 
-// resume 用的有效 rollout: 当前仅应用 ThreadRolledBack (压缩仍保留全文 + marker, 与迁移全量策略一致)
+// 有效 rollout: 应用 ThreadRolledBack; 压缩仍保留全文 + marker (迁移全量策略, 异于 resume 替换历史)
 export function effectiveRolloutLines(lines: NativeRecord[]): EffectiveRollout {
   return applyThreadRollbacks(lines);
 }

@@ -283,7 +283,8 @@ function linearFallback(entries: NativeRecord[], customTitle: string, aiTitle: s
   return { messages, customTitle, aiTitle, abandonedCount: sidechainCount, snippedCount: 0 };
 }
 
-// resume 用的有效 transcript: snip → preserved compact → 从最近非 sidechain leaf 回溯
+// resume 用的有效 transcript: preserved compact → snip → 从最近非 sidechain leaf 回溯
+// 顺序与 ClaudeCodeRev loadTranscriptFile 一致 (先 compact relink, 再 snip 删链)
 export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscript {
   const { customTitle, aiTitle } = extractTitles(entries);
 
@@ -313,8 +314,8 @@ export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscrip
     return linearFallback(entries, customTitle, aiTitle);
   }
 
-  const snippedCount = applySnipRemovals(messages);
   applyPreservedSegmentRelinks(messages);
+  const snippedCount = applySnipRemovals(messages);
 
   // 与 getLastSessionLog 一致: 最近一条非 sidechain 消息作 leaf
   const leaf = findLatestMessage(messages.values(), (m) => !m.isSidechain);
