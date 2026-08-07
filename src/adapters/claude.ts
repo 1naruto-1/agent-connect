@@ -27,8 +27,8 @@ export function available(): boolean {
 }
 
 // Claude 标题优先级与官方 lite metadata 一致: custom-title > ai-title > 首条用户消息
-function sessionTitle(customTitle: string, aiTitle: string, messages: NativeRecord[]): string {
-  const explicit = normalizeTitle(customTitle) || normalizeTitle(aiTitle);
+function sessionTitle(customTitle: string | undefined, aiTitle: string, messages: NativeRecord[]): string {
+  const explicit = customTitle !== undefined ? normalizeTitle(customTitle) : normalizeTitle(aiTitle);
   if (explicit) return explicit;
   for (const l of messages) {
     if (l.type !== 'user' || l.isMeta) continue;

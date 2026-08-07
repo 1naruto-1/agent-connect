@@ -12,7 +12,7 @@ import type { NativeRecord } from '../types.ts';
 export interface EffectiveTranscript {
   // 活跃链 (根 → leaf), 含 user/assistant/system/attachment
   messages: NativeRecord[];
-  customTitle: string;
+  customTitle: string | undefined;
   aiTitle: string;
   // 因不在活跃链上而丢弃的 transcript 消息数 (废弃分支 / sidechain 等)
   abandonedCount: number;
@@ -111,7 +111,7 @@ export function applySnipRemovals(messages: Map<string, NativeRecord>): number {
 
 // 移植 applyPreservedSegmentRelinks 的核心: 把 compact 保留段挂回 anchor, 并剪掉边界前未保留消息
 export function applyPreservedSegmentRelinks(messages: Map<string, NativeRecord>): void {
-  type Seg = { headUuid?: string; tailUuid?: string; anchorUuid?: string };
+  type Seg = { headUuid?: unknown; tailUuid?: unknown; anchorUuid?: unknown };
   let lastSeg: Seg | undefined;
   let lastSegBoundaryIdx = -1;
   let absoluteLastBoundaryIdx = -1;
@@ -121,9 +121,9 @@ export function applyPreservedSegmentRelinks(messages: Map<string, NativeRecord>
     entryIndex.set(String(entry.uuid), i);
     if (isCompactBoundary(entry)) {
       absoluteLastBoundaryIdx = i;
-      const seg = entry.compactMetadata?.preservedSegment as Seg | undefined;
-      if (seg?.headUuid && seg?.tailUuid && seg?.anchorUuid) {
-        lastSeg = seg;
+      const seg = entry.compactMetadata?.preservedSegment;
+      if (seg) {
+        lastSeg = typeof seg === 'object' ? seg as Seg : {};
         lastSegBoundaryIdx = i;
       }
     }
@@ -134,13 +134,20 @@ export function applyPreservedSegmentRelinks(messages: Map<string, NativeRecord>
   const segIsLive = lastSegBoundaryIdx === absoluteLastBoundaryIdx;
   const preservedUuids = new Set<string>();
   if (segIsLive) {
+    const { headUuid, tailUuid, anchorUuid } = lastSeg;
+    if (
+      typeof headUuid !== 'string' || !headUuid
+      || typeof tailUuid !== 'string' || !tailUuid
+      || typeof anchorUuid !== 'string' || !anchorUuid
+    ) return;
+
     const walkSeen = new Set<string>();
-    let cur = messages.get(lastSeg.tailUuid!);
+    let cur = messages.get(tailUuid);
     let reachedHead = false;
     while (cur && !walkSeen.has(String(cur.uuid))) {
       walkSeen.add(String(cur.uuid));
       preservedUuids.add(String(cur.uuid));
-      if (cur.uuid === lastSeg.headUuid) {
+      if (cur.uuid === headUuid) {
         reachedHead = true;
         break;
       }
@@ -148,13 +155,13 @@ export function applyPreservedSegmentRelinks(messages: Map<string, NativeRecord>
     }
     if (!reachedHead) return;
 
-    const head = messages.get(lastSeg.headUuid!);
+    const head = messages.get(headUuid);
     if (head) {
-      messages.set(lastSeg.headUuid!, { ...head, parentUuid: lastSeg.anchorUuid });
+      messages.set(headUuid, { ...head, parentUuid: anchorUuid });
     }
     for (const [uuid, msg] of messages) {
-      if (msg.parentUuid === lastSeg.anchorUuid && uuid !== lastSeg.headUuid) {
-        messages.set(uuid, { ...msg, parentUuid: lastSeg.tailUuid });
+      if (msg.parentUuid === anchorUuid && uuid !== headUuid) {
+        messages.set(uuid, { ...msg, parentUuid: tailUuid });
       }
     }
   }
@@ -262,8 +269,8 @@ export function buildConversationChain(
   return recoverOrphanedParallelToolResults(messages, transcript, seen);
 }
 
-function extractTitles(entries: NativeRecord[]): { customTitle: string; aiTitle: string } {
-  let customTitle = '';
+function extractTitles(entries: NativeRecord[]): { customTitle: string | undefined; aiTitle: string } {
+  let customTitle: string | undefined;
   let aiTitle = '';
   for (const entry of entries) {
     if (entry.type === 'custom-title' && entry.customTitle != null) {
@@ -276,7 +283,7 @@ function extractTitles(entries: NativeRecord[]): { customTitle: string; aiTitle:
 }
 
 // 无 uuid 的旧夹具 / 简化记录: 保持线性顺序, 但仍跳过 isSidechain
-function linearFallback(entries: NativeRecord[], customTitle: string, aiTitle: string): EffectiveTranscript {
+function linearFallback(entries: NativeRecord[], customTitle: string | undefined, aiTitle: string): EffectiveTranscript {
   const messages = entries.filter((e) => isTranscriptMessage(e) && !e.isSidechain);
   const sidechainCount = entries.filter((e) => isTranscriptMessage(e) && e.isSidechain).length;
   return { messages, customTitle, aiTitle, abandonedCount: sidechainCount, snippedCount: 0 };

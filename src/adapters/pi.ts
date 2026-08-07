@@ -45,11 +45,15 @@ export function available(): boolean {
 const blockText = (content: unknown): string =>
   typeof content === 'string' ? content : ((content as NativeRecord[]) || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
-// 活跃分支上第一条可作标题的用户消息 (与 titleFromEvents 的规则一致)
+// 活跃分支上第一条可作标题的用户消息或 shell 命令 (与 titleFromEvents 的规则一致)
 function firstUserTitle(activePath: NativeRecord[]): string {
   for (const entry of activePath) {
-    if (entry.type !== 'message' || entry.message?.role !== 'user') continue;
-    const candidate = titleFromMessage(blockText(entry.message.content));
+    let candidate = '';
+    if (entry.type === 'message' && entry.message?.role === 'user') {
+      candidate = titleFromMessage(blockText(entry.message.content));
+    } else if (entry.type === 'message' && entry.message?.role === 'bashExecution' && !entry.message.excludeFromContext) {
+      candidate = titleFromMessage(bashExecutionToText(entry.message));
+    }
     if (candidate) return candidate;
   }
   return '';

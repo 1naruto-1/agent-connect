@@ -78,8 +78,12 @@ export function buildSessionPath(entries: NativeRecord[], leafId?: string | null
   if (!leaf) return [];
 
   const path: NativeRecord[] = [];
+  const seen = new Set<string>();
   let current: NativeRecord | undefined = leaf;
   while (current) {
+    const currentId = String(current.id);
+    if (seen.has(currentId)) break;
+    seen.add(currentId);
     path.push(current);
     current = current.parentId ? index.get(String(current.parentId)) : undefined;
   }

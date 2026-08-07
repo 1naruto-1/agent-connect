@@ -17,6 +17,7 @@ const { homeDirectory } = await import('../src/platform/paths.ts');
 const claude = await import('../src/adapters/claude.ts');
 const codex = await import('../src/adapters/codex.ts');
 const pi = await import('../src/adapters/pi.ts');
+const { buildSessionPath } = await import('../src/adapters/pi-session.ts');
 
 const restoreEnv = (key: 'HOME' | 'USERPROFILE', value: string | undefined): void => {
   if (value === undefined) delete process.env[key];
@@ -196,6 +197,17 @@ describe('claude adapter', () => {
     expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === titled)!.title).toBe('user renamed');
   });
 
+  test('readSession lets an empty custom-title clear an older ai-title', () => {
+    const cleared = randomUUID();
+    writeJsonl(path.join(sessionDir, `${cleared}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: 'fallback prompt' } },
+      { type: 'ai-title', aiTitle: 'stale ai title', sessionId: cleared },
+      { type: 'custom-title', customTitle: '', sessionId: cleared },
+    ]);
+    expect(claude.readSession(projectCwd, cleared).title).toBe('fallback prompt');
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === cleared)!.title).toBe('fallback prompt');
+  });
+
   test('readSession keeps compact_boundary as a marker on the active chain', () => {
     const compacted = randomUUID();
     const u1 = randomUUID(), boundary = randomUUID(), u2 = randomUUID();
@@ -212,6 +224,50 @@ describe('claude adapter', () => {
     expect(events.map((e: CanonicalEvent) => e.kind)).toEqual(['marker', 'user']);
     expect((events[0] as any).text).toContain('12');
     expect((events[1] as any).text).toBe('after compact');
+  });
+
+  test('readSession keeps history when the latest preservedSegment is incomplete', () => {
+    const partial = randomUUID();
+    const u0 = randomUUID(), firstBoundary = randomUUID(), u1 = randomUUID(), latestBoundary = randomUUID(), u2 = randomUUID();
+    writeJsonl(path.join(sessionDir, `${partial}.jsonl`), [
+      { type: 'user', uuid: u0, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'keep root' } },
+      {
+        type: 'system', uuid: firstBoundary, parentUuid: u0, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z',
+        subtype: 'compact_boundary', compactMetadata: { preservedSegment: { headUuid: u0, tailUuid: u0, anchorUuid: u0 } },
+      },
+      { type: 'user', uuid: u1, parentUuid: firstBoundary, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'user', content: 'keep middle' } },
+      {
+        type: 'system', uuid: latestBoundary, parentUuid: u1, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', compactMetadata: { preservedSegment: { headUuid: u1, tailUuid: u1 } },
+      },
+      { type: 'user', uuid: u2, parentUuid: latestBoundary, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'user', content: 'keep latest' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, partial);
+    expect(events.filter((e: CanonicalEvent) => e.kind === 'user').map((e: any) => e.text)).toEqual([
+      'keep root', 'keep middle', 'keep latest',
+    ]);
+  });
+
+  test('readSession keeps history when the preserved tail cannot reach its head', () => {
+    const broken = randomUUID();
+    const root = randomUUID(), wrongHead = randomUUID(), tail = randomUUID(), boundary = randomUUID(), after = randomUUID();
+    writeJsonl(path.join(sessionDir, `${broken}.jsonl`), [
+      { type: 'user', uuid: root, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'keep root' } },
+      { type: 'user', uuid: wrongHead, parentUuid: root, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'different branch' } },
+      { type: 'assistant', uuid: tail, parentUuid: root, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'keep tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', compactMetadata: { preservedSegment: { headUuid: wrongHead, tailUuid: tail, anchorUuid: root } },
+      },
+      { type: 'user', uuid: after, parentUuid: boundary, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'user', content: 'keep after' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, broken);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'keep root'],
+      ['assistant-text', 'keep tail'],
+      ['marker', '[Claude Code 曾在此处压缩上下文]'],
+      ['user', 'keep after'],
+    ]);
   });
 
   // snip 在构建活跃链之前应用; 完整流水线顺序是 compact relink → snip (见 effectiveTranscript)
@@ -496,6 +552,22 @@ describe('pi adapter', () => {
     expect(skipped['非活跃分支']).toBe(2);
   });
 
+  test('buildSessionPath stops at self-references, cycles, and broken parents', () => {
+    expect(buildSessionPath([
+      { type: 'message', id: 'self', parentId: 'self' },
+    ]).map((entry) => entry.id)).toEqual(['self']);
+
+    expect(buildSessionPath([
+      { type: 'message', id: 'a', parentId: 'b' },
+      { type: 'message', id: 'b', parentId: 'a' },
+    ]).map((entry) => entry.id)).toEqual(['a', 'b']);
+
+    expect(buildSessionPath([
+      { type: 'message', id: 'root', parentId: null },
+      { type: 'message', id: 'leaf', parentId: 'missing' },
+    ]).map((entry) => entry.id)).toEqual(['leaf']);
+  });
+
   test('readSession keeps branch_summary entries as markers on the active branch', () => {
     const summarized = randomUUID();
     writeJsonl(path.join(sessionDir, `2026-07-26T10-00-03-000Z_${summarized}.jsonl`), [
@@ -536,7 +608,9 @@ describe('pi adapter', () => {
       { type: 'message', id: 'e1', parentId: null, timestamp: TS, message: { role: 'bashExecution', command: 'git status', output: 'clean', exitCode: 0, cancelled: false, truncated: false, timestamp: 0 } },
       { type: 'message', id: 'e2', parentId: 'e1', timestamp: TS, message: { role: 'bashExecution', command: 'secret', output: 'hidden', exitCode: 0, cancelled: false, truncated: false, timestamp: 0, excludeFromContext: true } },
     ]);
-    const { events, skipped } = pi.readSession(projectCwd, bashed);
+    const { title, events, skipped } = pi.readSession(projectCwd, bashed);
+    expect(title).toMatch(/^Ran `git status`/);
+    expect(pi.listSessions(projectCwd).find((s: { id: string }) => s.id === bashed)!.title).toBe(title);
     expect(events.length).toBe(1);
     expect((events[0] as any).text).toContain('Ran `git status`');
     expect((events[0] as any).text).toContain('clean');
