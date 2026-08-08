@@ -139,11 +139,11 @@ Agent Connect 使用中心辐射架构：每个 Harness 提供一个读取器和
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | 支持 | 支持 |
 | Pi | `~/.pi/agent/sessions/--<项目>--/*.jsonl` | 支持 | 支持 |
 
-Pi 会话是一棵记录树：回退重问或 `/tree` 切换会留下被放弃的分支。Agent Connect 与 Pi 原版的恢复判定一致，只迁移活跃分支（从文件最后一条记录沿 `parentId` 回溯到根），被放弃的分支计入迁移报告的跳过统计。
+Pi 会话是一棵记录树：回退重问或 `/tree` 切换会留下被放弃的分支。正常会话按 Pi 的恢复判定，只迁移从文件最后一条记录沿 `parentId` 回溯到根的活跃分支；环或断链会在已确认路径处安全停止，避免损坏文件阻塞迁移。被放弃的分支计入跳过统计；上下文压缩前的活跃分支明细仍保留，摘要作为 marker 迁移。
 
-Claude Code 会话同样是追加式 JSONL 消息树：回退或重试会留下废弃的 `parentUuid` 分支。Agent Connect 与官方 `--resume` 一致，只迁移从最近一条非 sidechain 消息回溯到根的活跃链；`snip` 裁剪与废弃分支计入跳过统计，`compact_boundary` 保留为标记。
+Claude Code 会话同样是追加式 JSONL 消息树：回退或重试会留下废弃的 `parentUuid` 分支。正常 transcript 按官方 `--resume` 语义，从最近一条非 sidechain 消息回溯活跃链并依次应用 compact、snip；不完整 compact metadata 采用保守保留策略。`snip` 裁剪与废弃分支计入跳过统计，`compact_boundary` 保留为标记。
 
-Codex rollout 是追加式 JSONL：用户回退会追加 `thread_rolled_back`。Agent Connect 与 Codex 原版 resume 一致，只迁移回退后仍有效的轮次；被丢弃的轮次计入迁移报告的跳过统计。分页格式中的 `item_completed`（`UserMessage`）与旧版 `user_message` 均可识别。
+Codex rollout 是追加式 JSONL：用户回退会追加 `thread_rolled_back`。Agent Connect 按可确认的真实用户轮次应用回退：优先识别旧版 `user_message` 与分页 `item_completed(UserMessage)`，缺失时回退到非上下文 ResponseItem 或 inter-agent 边界，并去重双轨记录。被丢弃的轮次计入迁移报告。与 Codex 原生 resume 的模型上下文替换不同，迁移会保留压缩前的完整历史，并把 compaction 摘要作为 marker。
 
 更完整的事件模型、适配器契约和存储说明见 [架构文档](docs/architecture.md)。
 
