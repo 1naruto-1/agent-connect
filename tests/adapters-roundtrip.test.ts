@@ -295,25 +295,26 @@ describe('claude adapter', () => {
     expect(skipped['已裁剪消息']).toBe(2);
   });
 
-  // compact 必须先于 snip: 若先 snip 掉 preserved head, compact 无法走通保留段, 会提前返回并留下应被剪掉的旧消息
+  // compact 必须先于 snip: 若先 snip 掉 preserved head, compact 无法走通保留段, 会提前返回并留下应被剪掉的旧消息。
+  // 使用原生后缀形态: boundary parentUuid:null/logicalParentUuid=tail, 锚点是 boundary 后的 isCompactSummary 摘要
   test('readSession applies preservedSegment compact before snip when both are present', () => {
     const mixed = randomUUID();
-    const uAnchor = randomUUID(), uOld = randomUUID(), uHead = randomUUID(), aTail = randomUUID();
-    const compactBoundary = randomUUID(), uAfter = randomUUID(), uFinal = randomUUID(), snipBoundary = randomUUID();
+    const uOld = randomUUID(), uHead = randomUUID(), aTail = randomUUID();
+    const compactBoundary = randomUUID(), uSummary = randomUUID(), uAfter = randomUUID(), uFinal = randomUUID(), snipBoundary = randomUUID();
     writeJsonl(path.join(sessionDir, `${mixed}.jsonl`), [
-      { type: 'user', uuid: uAnchor, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'anchor keep' } },
-      { type: 'user', uuid: uOld, parentUuid: uAnchor, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'should be pruned by compact' } },
-      { type: 'user', uuid: uHead, parentUuid: uOld, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'user', content: 'preserved head' } },
-      { type: 'assistant', uuid: aTail, parentUuid: uHead, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      { type: 'user', uuid: uOld, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'should be pruned by compact' } },
+      { type: 'user', uuid: uHead, parentUuid: uOld, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: aTail, parentUuid: uHead, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
       {
-        type: 'system', uuid: compactBoundary, parentUuid: aTail, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z',
+        type: 'system', uuid: compactBoundary, parentUuid: null, logicalParentUuid: aTail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
         subtype: 'compact_boundary', content: 'Conversation compacted',
         compactMetadata: {
           trigger: 'manual', preTokens: 2000, messagesSummarized: 1,
-          preservedSegment: { headUuid: uHead, tailUuid: aTail, anchorUuid: uAnchor },
+          preservedSegment: { headUuid: uHead, tailUuid: aTail, anchorUuid: uSummary },
         },
       },
-      { type: 'user', uuid: uAfter, parentUuid: compactBoundary, isSidechain: false, timestamp: '2026-07-26T10:00:05.000Z', message: { role: 'user', content: 'after compact' } },
+      { type: 'user', uuid: uSummary, parentUuid: compactBoundary, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', isCompactSummary: true, message: { role: 'user', content: '压缩后的摘要' } },
+      { type: 'user', uuid: uAfter, parentUuid: uSummary, isSidechain: false, timestamp: '2026-07-26T10:00:05.000Z', message: { role: 'user', content: 'after compact' } },
       { type: 'user', uuid: uFinal, parentUuid: uAfter, isSidechain: false, timestamp: '2026-07-26T10:00:06.000Z', message: { role: 'user', content: 'after snip' } },
       {
         type: 'system', uuid: snipBoundary, parentUuid: uFinal, isSidechain: false, timestamp: '2026-07-26T10:00:07.000Z',
@@ -321,16 +322,173 @@ describe('claude adapter', () => {
       },
     ]);
     const { events, skipped } = claude.readSession(projectCwd, mixed);
-    // compact 剪掉 uOld; 随后 snip 去掉 preserved head; tail 仍在链上
+    // compact 把 head 挂回摘要、把 continuation 改挂 tail 并剪掉 uOld; 随后 snip 去掉 preserved head; tail 仍在链上
     expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
-      ['assistant-text', 'preserved tail'],
       ['marker', '[Claude Code 曾在此处压缩上下文, 约 1 条消息]'],
+      ['user', '压缩后的摘要'],
+      ['assistant-text', 'preserved tail'],
       ['user', 'after compact'],
       ['user', 'after snip'],
     ]);
     expect(skipped['已裁剪消息']).toBe(1);
     expect(events.some((e: CanonicalEvent) => (e as any).text === 'should be pruned by compact')).toBe(false);
     expect(events.some((e: CanonicalEvent) => (e as any).text === 'preserved head')).toBe(false);
+  });
+
+  // 锚点记录缺失: 保留段元数据齐全且 tail 可达 head, 但 anchorUuid 指向不存在的记录。
+  // 旧实现会先重链再裁剪, 剪掉根节点并给 head 挂上空悬父链; 现在校验不过就整体跳过, 完整旧链保留
+  test('readSession keeps the full chain when the preserved anchor record is missing', () => {
+    const missingAnchor = randomUUID();
+    const root = randomUUID(), head = randomUUID(), tail = randomUUID(), boundary = randomUUID(), missing = randomUUID(), later = randomUUID();
+    writeJsonl(path.join(sessionDir, `${missingAnchor}.jsonl`), [
+      { type: 'user', uuid: root, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'keep root' } },
+      { type: 'user', uuid: head, parentUuid: root, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: tail, parentUuid: head, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, logicalParentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'auto', preTokens: 2000, messagesSummarized: 3, preservedSegment: { headUuid: head, tailUuid: tail, anchorUuid: missing } },
+      },
+      { type: 'user', uuid: later, parentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'user', content: 'keep later' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, missingAnchor);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'keep root'],
+      ['user', 'preserved head'],
+      ['assistant-text', 'preserved tail'],
+      ['user', 'keep later'],
+    ]);
+  });
+
+  // 锚点是 boundary 前会被裁剪的普通旧消息 (physical index < boundary): 拒绝重链与裁剪, 完整旧链保留
+  test('readSession keeps the full chain when the preserved anchor predates the boundary', () => {
+    const badAnchor = randomUUID();
+    const anchor = randomUUID(), head = randomUUID(), tail = randomUUID(), boundary = randomUUID(), later = randomUUID();
+    writeJsonl(path.join(sessionDir, `${badAnchor}.jsonl`), [
+      { type: 'user', uuid: anchor, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'anchor keep' } },
+      { type: 'user', uuid: head, parentUuid: anchor, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: tail, parentUuid: head, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, logicalParentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'auto', preTokens: 2000, messagesSummarized: 3, preservedSegment: { headUuid: head, tailUuid: tail, anchorUuid: anchor } },
+      },
+      { type: 'user', uuid: later, parentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'user', content: 'keep later' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, badAnchor);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'anchor keep'],
+      ['user', 'preserved head'],
+      ['assistant-text', 'preserved tail'],
+      ['user', 'keep later'],
+    ]);
+  });
+
+  test('readSession keeps the full chain when the preserved anchor points into the preserved segment', () => {
+    const cyclicAnchor = randomUUID();
+    const root = randomUUID(), head = randomUUID(), tail = randomUUID(), boundary = randomUUID(), summary = randomUUID(), later = randomUUID();
+    writeJsonl(path.join(sessionDir, `${cyclicAnchor}.jsonl`), [
+      { type: 'user', uuid: root, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'keep root' } },
+      { type: 'user', uuid: head, parentUuid: root, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: tail, parentUuid: head, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, logicalParentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'auto', preTokens: 2000, messagesSummarized: 3, preservedSegment: { headUuid: head, tailUuid: tail, anchorUuid: summary } },
+      },
+      { type: 'user', uuid: summary, parentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', isCompactSummary: true, message: { role: 'user', content: 'invalid summary parent' } },
+      { type: 'user', uuid: later, parentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:05.000Z', message: { role: 'user', content: 'keep later' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, cyclicAnchor);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'keep root'],
+      ['user', 'preserved head'],
+      ['assistant-text', 'preserved tail'],
+      ['user', 'keep later'],
+    ]);
+  });
+
+  // 原生 compact 前缀形态: anchorUuid 就是 compact boundary 自身 (physical index == boundary),
+  // boundary parentUuid:null + logicalParentUuid=tail; relink 后活跃链为 boundary→head→tail→continuation
+  test('readSession relinks a prefix-preserving segment anchored at the boundary itself', () => {
+    const prefixed = randomUUID();
+    const oldRoot = randomUUID(), head = randomUUID(), tail = randomUUID(), boundary = randomUUID(), after = randomUUID();
+    writeJsonl(path.join(sessionDir, `${prefixed}.jsonl`), [
+      { type: 'user', uuid: oldRoot, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: 'summarized old root' } },
+      { type: 'user', uuid: head, parentUuid: oldRoot, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: tail, parentUuid: head, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, logicalParentUuid: tail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'auto', preTokens: 2000, messagesSummarized: 3, preservedSegment: { headUuid: head, tailUuid: tail, anchorUuid: boundary } },
+      },
+      { type: 'user', uuid: after, parentUuid: boundary, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', message: { role: 'user', content: 'after compact' } },
+    ]);
+    const { events } = claude.readSession(projectCwd, prefixed);
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['marker', '[Claude Code 曾在此处压缩上下文, 约 3 条消息]'],
+      ['user', 'preserved head'],
+      ['assistant-text', 'preserved tail'],
+      ['user', 'after compact'],
+    ]);
+    expect(events.some((e: CanonicalEvent) => (e as any).text === 'summarized old root')).toBe(false);
+  });
+
+  // 原生 compact 后缀形态: 保留段 (head/tail) 物理上位于 boundary 之前, boundary 之后的
+  // isCompactSummary 用户消息是 anchor; relink 把 head 挂回摘要、把摘要的后续子消息改挂 tail。
+  // 标题必须取自修剪前的原始提示词, 而不是压缩摘要。
+  test('readSession titles a compacted session from the pre-compact prompt, never the summary', () => {
+    const compacted = randomUUID();
+    const uOld = randomUUID(), uHead = randomUUID(), aTail = randomUUID(), boundary = randomUUID(), uSummary = randomUUID(), uAfter = randomUUID();
+    writeJsonl(path.join(sessionDir, `${compacted}.jsonl`), [
+      { type: 'user', uuid: uOld, parentUuid: null, isSidechain: false, timestamp: TS, message: { role: 'user', content: '最初的真实问题' } },
+      { type: 'user', uuid: uHead, parentUuid: uOld, isSidechain: false, timestamp: '2026-07-26T10:00:01.000Z', message: { role: 'user', content: 'preserved head' } },
+      { type: 'assistant', uuid: aTail, parentUuid: uHead, isSidechain: false, timestamp: '2026-07-26T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'preserved tail' }] } },
+      {
+        type: 'system', uuid: boundary, parentUuid: null, logicalParentUuid: aTail, isSidechain: false, timestamp: '2026-07-26T10:00:03.000Z',
+        subtype: 'compact_boundary', content: 'Conversation compacted',
+        compactMetadata: { trigger: 'auto', preTokens: 5000, messagesSummarized: 8, preservedSegment: { headUuid: uHead, tailUuid: aTail, anchorUuid: uSummary } },
+      },
+      { type: 'user', uuid: uSummary, parentUuid: boundary, isSidechain: false, timestamp: '2026-07-26T10:00:04.000Z', isCompactSummary: true, message: { role: 'user', content: '此前 8 条消息的压缩摘要, 不应成为标题' } },
+      { type: 'user', uuid: uAfter, parentUuid: uSummary, isSidechain: false, timestamp: '2026-07-26T10:00:05.000Z', message: { role: 'user', content: '压缩后的后续问题' } },
+    ]);
+    const { title, events, skipped } = claude.readSession(projectCwd, compacted);
+    expect(title).toBe('最初的真实问题');
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === compacted)!.title).toBe('最初的真实问题');
+    // 摘要仍是规范 user 事件 (上下文), 但绝不能成为标题
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['marker', '[Claude Code 曾在此处压缩上下文, 约 8 条消息]'],
+      ['user', '此前 8 条消息的压缩摘要, 不应成为标题'],
+      ['user', 'preserved head'],
+      ['assistant-text', 'preserved tail'],
+      ['user', '压缩后的后续问题'],
+    ]);
+    // 旧提示已被 compact 剪出活跃链, 只影响标题选择, 事件流里不应再出现
+    expect(events.some((e: CanonicalEvent) => (e as any).text === '最初的真实问题')).toBe(false);
+    expect(skipped).toEqual({});
+  });
+
+  // 数组内容逐块独立判定: IDE/包装文本块可被跳过, 后面的真实提示词块成为标题
+  test('readSession titles from the first meaningful text block of array content', () => {
+    const arrayTitle = randomUUID();
+    writeJsonl(path.join(sessionDir, `${arrayTitle}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: '<command-name>/model</command-name>' }, { type: 'text', text: '真正要问的问题' }] } },
+      { type: 'assistant', timestamp: TS, message: { role: 'assistant', content: [{ type: 'text', text: '回答' }] } },
+    ]);
+    expect(claude.readSession(projectCwd, arrayTitle).title).toBe('真正要问的问题');
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === arrayTitle)!.title).toBe('真正要问的问题');
+  });
+
+  // 只有包装/元信息/压缩摘要时, 不得把摘要当标题: 列表保持 (无标题), 读取用 harness 兜底
+  test('readSession never titles from compact summaries or wrappers', () => {
+    const summaryOnly = randomUUID();
+    writeJsonl(path.join(sessionDir, `${summaryOnly}.jsonl`), [
+      { type: 'user', timestamp: TS, message: { role: 'user', content: '<command-name>/init</command-name>' } },
+      { type: 'user', timestamp: TS, isCompactSummary: true, message: { role: 'user', content: '之前工作的压缩摘要' } },
+      { type: 'user', timestamp: TS, isMeta: true, message: { role: 'user', content: '元信息' } },
+    ]);
+    expect(claude.readSession(projectCwd, summaryOnly).title).toBe(`Claude Code 会话 ${summaryOnly.slice(0, 8)}`);
+    expect(claude.listSessions(projectCwd).find((s: { id: string }) => s.id === summaryOnly)!.title).toBe('(无标题)');
   });
 });
 
@@ -390,15 +548,15 @@ describe('codex adapter', () => {
     const rolled = randomUUID();
     writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-02-${rolled}.jsonl`), [
       { timestamp: TS, type: 'session_meta', payload: { session_id: rolled, id: rolled, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
-      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'keep this turn' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'keep this turn' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'keep this turn' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'kept answer' }] } },
-      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'abandon this turn' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'abandon this turn' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'abandon this turn' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'abandoned answer' }] } },
       { timestamp: TS, type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
-      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'retry after rollback' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'retry after rollback' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'retry after rollback' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final answer' }] } },
     ]);
     const { events, skipped } = codex.readSession(projectCwd, rolled);
@@ -409,7 +567,7 @@ describe('codex adapter', () => {
       ['assistant-text', 'final answer'],
     ]);
     expect(skipped['已回退轮次']).toBe(1);
-    expect(skipped['注入消息(user)']).toBe(2); // 保留轮次与重试轮次各一条; 被回退轮次的注入行已随截断消失
+    expect(skipped['注入消息(user)']).toBeUndefined();
   });
 
   // 分页 history_mode 用 item_completed(UserMessage) 代替 legacy user_message
@@ -417,6 +575,7 @@ describe('codex adapter', () => {
     const paged = randomUUID();
     writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-03-${paged}.jsonl`), [
       { timestamp: TS, type: 'session_meta', payload: { session_id: paged, id: paged, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai', history_mode: 'paginated' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'paginated hello' }] } },
       {
         timestamp: TS,
         type: 'event_msg',
@@ -438,17 +597,36 @@ describe('codex adapter', () => {
     expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === paged)!.title).toBe('paginated hello');
   });
 
+  test('readSession supports historical writer-order event->response user turns', () => {
+    const writerOrdered = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-06-${writerOrdered}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: writerOrdered, id: writerOrdered, timestamp: TS, cwd: projectCwd, originator: 'agent-connect', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'writer order prompt' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'writer order prompt' }] } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'writer order answer' }] } },
+    ]);
+    const { title, events, skipped } = codex.readSession(projectCwd, writerOrdered);
+    expect(title).toBe('writer order prompt');
+    expect(events.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'writer order prompt'],
+      ['assistant-text', 'writer order answer'],
+    ]);
+    expect(skipped['注入消息(user)']).toBeUndefined();
+  });
+
   test('readSession surfaces response-only users and inter-agent communications', () => {
     const nativeOnly = randomUUID();
     writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-05-${nativeOnly}.jsonl`), [
       { timestamp: TS, type: 'session_meta', payload: { session_id: nativeOnly, id: nativeOnly, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'response-only prompt' }] } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'response-only answer' }] } },
-      { timestamp: TS, type: 'inter_agent_communication', payload: { author: 'agent-a', recipient: 'agent-b', content: 'delegated work', trigger_turn: true } },
+      { timestamp: TS, type: 'inter_agent_communication_metadata', payload: { trigger_turn: true } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'agent_message', author: 'agent-a', recipient: 'agent-b', content: [{ type: 'input_text', text: 'delegated work' }] } },
       { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'delegated answer' }] } },
     ]);
     const { title, events, skipped } = codex.readSession(projectCwd, nativeOnly);
     expect(title).toBe('response-only prompt');
+    expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === nativeOnly)!.title).toBe('response-only prompt');
     expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
       ['user', 'response-only prompt'],
       ['assistant-text', 'response-only answer'],
@@ -458,10 +636,73 @@ describe('codex adapter', () => {
     expect(skipped['注入消息(user)']).toBeUndefined();
   });
 
+  test('readSession excludes persisted Codex context fragments from turns and titles', () => {
+    const contextual = randomUUID();
+    const agentsInstructions = '# AGENTS.md instructions for /work\n\n<INSTRUCTIONS>\nUse Bun.\n</INSTRUCTIONS>';
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-08-${contextual}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: contextual, id: contextual, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: agentsInstructions }] } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'actual prompt' }] } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'actual prompt' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'actual answer' }] } },
+    ]);
+    const { title, events, skipped } = codex.readSession(projectCwd, contextual);
+    expect(title).toBe('actual prompt');
+    expect(codex.listSessions(projectCwd).find((s: { id: string }) => s.id === contextual)!.title).toBe('actual prompt');
+    expect(events.map((e: CanonicalEvent) => [e.kind, (e as any).text])).toEqual([
+      ['user', 'actual prompt'],
+      ['assistant-text', 'actual answer'],
+    ]);
+    expect(skipped['注入消息(user)']).toBe(1);
+  });
+
+  test('readSession supports event-only and response-only user turns', () => {
+    const eventOnly = randomUUID();
+    writeJsonl(path.join(tempHome, '.codex', 'sessions', '2026', '07', '26', `rollout-2026-07-26T10-00-07-${eventOnly}.jsonl`), [
+      { timestamp: TS, type: 'session_meta', payload: { session_id: eventOnly, id: eventOnly, timestamp: TS, cwd: projectCwd, originator: 'codex', cli_version: '0.144.6', source: 'cli', model_provider: 'openai' } },
+      { timestamp: TS, type: 'event_msg', payload: { type: 'user_message', message: 'event-only user prompt' } },
+      { timestamp: TS, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'event-only answer' }] } },
+    ]);
+    const { title: eventTitle, events: eventEvents } = codex.readSession(projectCwd, eventOnly);
+    expect(eventTitle).toBe('event-only user prompt');
+    expect(eventEvents.map((e: any) => [e.kind, e.text])).toEqual([
+      ['user', 'event-only user prompt'],
+      ['assistant-text', 'event-only answer'],
+    ]);
+  });
+
+  test('userTurnBoundaries does not pair across assistant boundary and handles repeated prompts', () => {
+    const respUser = (text: string) => ({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+    const eventUser = (text: string) => ({ type: 'event_msg', payload: { type: 'user_message', message: text } });
+    const assistant = { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } };
+
+    // Separated by assistant response -> 2 distinct turns
+    const separated = userTurnBoundaries([respUser('hello'), assistant, eventUser('hello')]);
+    expect(separated.length).toBe(2);
+    expect(separated[0]).toMatchObject({ kind: 'response', index: 0, text: 'hello' });
+    expect(separated[1]).toMatchObject({ kind: 'event', index: 2, text: 'hello' });
+
+    // Repeated prompt in Turn 1 and Turn 2 (with assistant response) -> 2 distinct twin turns
+    const repeated = userTurnBoundaries([
+      respUser('hello'), eventUser('hello'), assistant,
+      respUser('hello'), eventUser('hello'), assistant,
+    ]);
+    expect(repeated.length).toBe(2);
+    expect(repeated[0]).toMatchObject({ index: 0, responseIndex: 0, eventIndex: 1 });
+    expect(repeated[1]).toMatchObject({ index: 3, responseIndex: 3, eventIndex: 4 });
+
+    // Distinct prompt texts adjacent -> 2 distinct turns
+    const distinct = userTurnBoundaries([respUser('prompt A'), eventUser('prompt B')]);
+    expect(distinct.length).toBe(2);
+    expect(distinct[0]).toMatchObject({ kind: 'response', index: 0, text: 'prompt A' });
+    expect(distinct[1]).toMatchObject({ kind: 'event', index: 1, text: 'prompt B' });
+  });
+
   test('rollback ignores malformed num_turns and deduplicates dual-track user turns', () => {
     const eventUser = { type: 'event_msg', payload: { type: 'user_message', message: 'visible user' } };
     const responseUser = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible user' }] } };
     const assistant = { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } };
+    expect(userTurnBoundaries([responseUser, eventUser, assistant]).map((b) => [b.index, b.kind])).toEqual([[0, 'event']]);
     expect(userTurnBoundaries([eventUser, responseUser, assistant]).map((b) => [b.index, b.kind])).toEqual([[0, 'event']]);
 
     for (const numTurns of ['1', true, 1.5, -1, 0, null, 0x1_0000_0000]) {
@@ -471,13 +712,22 @@ describe('codex adapter', () => {
       expect(result.rolledBackLines).toBe(0);
     }
 
-    const contextual = applyThreadRollbacks([
-      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>cwd</environment_context>' }] } },
-      assistant,
-      { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
-    ]);
-    expect(contextual.lines.length).toBe(2);
-    expect(contextual.rolledBackTurns).toBe(0);
+    const contextualMessages = [
+      '<environment_context>cwd</environment_context>',
+      '# AGENTS.md instructions for /work\n\n<INSTRUCTIONS>\nUse Bun.\n</INSTRUCTIONS>',
+      'Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.',
+      'Warning: Your account was flagged for potentially high-risk cyber activity.',
+      'Warning: The maximum number of unified exec processes you can keep open is 4.',
+    ];
+    for (const text of contextualMessages) {
+      const contextual = applyThreadRollbacks([
+        { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } },
+        assistant,
+        { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+      ]);
+      expect(contextual.lines.length).toBe(2);
+      expect(contextual.rolledBackTurns).toBe(0);
+    }
 
     const responseOnly = applyThreadRollbacks([
       { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'response only' }] } },
@@ -495,6 +745,16 @@ describe('codex adapter', () => {
     ]);
     expect(interAgent.lines).toEqual([]);
     expect(interAgent.rolledBackTurns).toBe(1);
+
+    const currentInterAgent = applyThreadRollbacks([
+      { type: 'inter_agent_communication_metadata', payload: { trigger_turn: true } },
+      { type: 'response_item', payload: { type: 'agent_message', author: 'agent-a', recipient: 'agent-b', content: [{ type: 'input_text', text: 'delegate this' }] } },
+      assistant,
+      { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } },
+    ]);
+    expect(currentInterAgent.lines).toEqual([]);
+    expect(currentInterAgent.rolledBackTurns).toBe(1);
+    expect(currentInterAgent.rolledBackLines).toBe(3);
   });
 
   test('rollback handles paginated turns, multiple rollbacks, and compaction markers', () => {
@@ -555,6 +815,10 @@ describe('codex adapter', () => {
     expect(lines[0]!.payload.cwd).toBe(projectCwd);
     expect(lines[0]!.payload.originator).toBe('agent-connect');
     expect(lines[0]!.payload.model_provider).toBe('openai'); // 取自真实会话模板
+    const firstResponseUser = lines.findIndex((line) => line.type === 'response_item' && line.payload?.role === 'user');
+    const firstEventUser = lines.findIndex((line) => line.type === 'event_msg' && line.payload?.type === 'user_message');
+    expect(firstResponseUser).toBeGreaterThan(0);
+    expect(firstEventUser).toBe(firstResponseUser + 1); // 对齐 Codex 原生 response → event 持久化顺序
 
     // 写出的会话可再读回, 事件语义保留
     const { events } = codex.readSession(projectCwd, written.id);

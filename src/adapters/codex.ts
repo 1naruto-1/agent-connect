@@ -9,10 +9,10 @@ import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
 import { titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
 import {
-  compactedMessage, effectiveRolloutLines, interAgentMessageText, isInterAgentCommunication,
-  isResponseUserMessage, isUserMessageEvent, loadRolloutLines, responseUserMessageText,
-  userMessageText, userTurnBoundaries,
+  compactedMessage, effectiveRolloutLines, isResponseUserMessage, loadRolloutLines,
+  userTurnBoundaries,
 } from './codex-session.ts';
+import type { UserTurnBoundary } from './codex-session.ts';
 import type { CanonicalEvent, NativeRecord, ReadSessionResult, SessionInfo, WriteSessionResult } from '../types.ts';
 
 export const id = 'codex';
@@ -69,9 +69,10 @@ const normPath = (p: unknown): string => {
 // Codex 会话列表预览: 与 resume 一致先去掉被 ThreadRolledBack 丢弃的轮次, 再取首条可用用户消息
 function sessionTitle(file: string): string {
   const { lines } = effectiveRolloutLines(loadRolloutLines(file));
-  for (const line of lines) {
-    if (!isUserMessageEvent(line)) continue;
-    const candidate = titleFromMessage(userMessageText(line.payload || {}));
+  const boundaries = userTurnBoundaries(lines);
+  for (const b of boundaries) {
+    if (b.kind === 'inter-agent') continue;
+    const candidate = titleFromMessage(b.text);
     if (candidate) return candidate;
   }
   return '';
@@ -118,11 +119,21 @@ export function readSession(_cwd: string, sessionId: string): ReadSessionResult 
   const events: CanonicalEvent[] = [];
   const skipped: Record<string, number> = {};
   if (rolledBackTurns > 0) skipped['已回退轮次'] = rolledBackTurns;
-  const responseOnlyUsers = new Set(
-    userTurnBoundaries(lines)
-      .filter((boundary) => boundary.kind === 'response')
-      .map((boundary) => boundary.line),
-  );
+
+  const boundaries = userTurnBoundaries(lines);
+  const emitMap = new Map<number, UserTurnBoundary>();
+  const consumedSecondaryIndexes = new Set<number>();
+
+  for (const b of boundaries) {
+    emitMap.set(b.index, b);
+    if (b.eventIndex !== undefined && b.responseIndex !== undefined) {
+      const secondIdx = Math.max(b.eventIndex, b.responseIndex);
+      consumedSecondaryIndexes.add(secondIdx);
+    }
+    if (b.interAgentIndex !== undefined && b.interAgentIndex !== b.index) {
+      consumedSecondaryIndexes.add(b.interAgentIndex);
+    }
+  }
 
   // 先收集工具输出 (call_id → output); 只在有效历史上配对
   const outputs = new Map<string, string>();
@@ -133,20 +144,28 @@ export function readSession(_cwd: string, sessionId: string): ReadSessionResult 
     }
   }
 
-  for (const l of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
     const ts = l.timestamp || new Date().toISOString();
     const p = l.payload;
-    if (isUserMessageEvent(l)) {
-      events.push({ kind: 'user', ts, text: userMessageText(p || {}) });
-    } else if (isInterAgentCommunication(l)) {
-      const text = interAgentMessageText(l);
-      events.push({ kind: 'marker', ts, text: text ? `[Codex agent communication]\n${text}` : '[Codex agent communication]' });
-    } else if (isResponseUserMessage(l)) {
-      if (responseOnlyUsers.has(l)) {
-        events.push({ kind: 'user', ts, text: responseUserMessageText(l) });
+
+    const boundary = emitMap.get(i);
+    if (boundary) {
+      if (boundary.kind === 'inter-agent') {
+        const text = boundary.text;
+        events.push({ kind: 'marker', ts, text: text ? `[Codex agent communication]\n${text}` : '[Codex agent communication]' });
       } else {
-        skipped['注入消息(user)'] = (skipped['注入消息(user)'] || 0) + 1;
+        events.push({ kind: 'user', ts, text: boundary.text });
       }
+      continue;
+    }
+
+    if (consumedSecondaryIndexes.has(i)) {
+      continue;
+    }
+
+    if (isResponseUserMessage(l)) {
+      skipped['注入消息(user)'] = (skipped['注入消息(user)'] || 0) + 1;
     } else if (l.type === 'response_item') {
       switch (p?.type) {
         case 'message':
@@ -260,9 +279,10 @@ export function writeSession(cwd: string, title: string, events: CanonicalEvent[
 
   // 真实 rollout 中助手内容在两条流各写一份: response_item(模型上下文) + event_msg(TUI 显示)
   const msgId = () => `msg_${randomUUID().replaceAll('-', '')}`;
+  // 当前 Codex 先持久化模型上下文 ResponseItem, 再写 TUI event_msg。
   const userMsg = (text: string, ts: string) => {
-    push('event_msg', { type: 'user_message', message: text, images: [], local_images: [], text_elements: [] }, ts);
     push('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }, ts);
+    push('event_msg', { type: 'user_message', message: text, images: [], local_images: [], text_elements: [] }, ts);
   };
   const assistantMsg = (text: string, phase: string, ts: string) => {
     push('response_item', { type: 'message', id: msgId(), role: 'assistant', content: [{ type: 'output_text', text }], phase }, ts);

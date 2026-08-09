@@ -2,7 +2,7 @@
 // - 参考 core/src/session/rollout_reconstruction.rs / thread_rollout_truncation.rs /
 //   app-server-protocol/.../thread_history.rs 的 ThreadRolledBack 行为
 // - legacy / paginated event_msg 是首选展示边界; 缺失时回退到非上下文
-//   ResponseItem::UserMessage 或 inter_agent_communication, 并去重双轨用户记录
+//   ResponseItem::UserMessage 或 inter-agent 记录; 双轨先后顺序不同也只保留一个逻辑轮次
 //
 // Rollout 是追加式 JSONL: 回退会追加 event_msg.thread_rolled_back, 压缩会追加 type=compacted。
 // 迁移只加载回退后的有效历史, 不得改写源文件。
@@ -60,16 +60,23 @@ export interface UserTurnBoundary {
   index: number;
   line: NativeRecord;
   kind: 'event' | 'response' | 'inter-agent';
+  text: string;
+  eventIndex?: number;
+  responseIndex?: number;
+  interAgentIndex?: number;
 }
 
 const CONTEXTUAL_USER_PREFIXES = [
-  '<user_instructions', '<environment_context', '<additional_context', '<skill',
+  '# agents.md instructions', '<user_instructions', '<environment_context', '<additional_context', '<skill',
   '<user_shell_command', '<turn_aborted', '<subagent_notification', '<internal_model_context',
   '<recommended_plugins', '<local-command-caveat', '<system-reminder', '<hook_prompt',
   '<permissions instructions', '<model_switch', '<apps_instructions', '<collaboration_mode',
   '<multi_agent_mode', '<environments_instructions', '<git_attribution', '<plugins_instructions',
   '<realtime_conversation', '<skills_instructions', '<tools', '<personality_spec',
   '<token_budget', '<context_window', '<rollout_budget',
+  'warning: apply_patch was requested via ',
+  'warning: your account was flagged for potentially high-risk cyber activity',
+  'warning: the maximum number of unified exec processes you can keep open is',
 ];
 
 export function isResponseUserMessage(line: NativeRecord): boolean {
@@ -95,52 +102,172 @@ function isContextualResponseUser(line: NativeRecord): boolean {
   });
 }
 
-export function isInterAgentCommunication(line: NativeRecord): boolean {
-  return line.type === 'inter_agent_communication'
+function isInterAgentMetadata(line: NativeRecord): boolean {
+  return line.type === 'inter_agent_communication_metadata'
     && !!line.payload
     && typeof line.payload === 'object';
 }
 
+function isAgentMessageResponse(line: NativeRecord): boolean {
+  return line.type === 'response_item'
+    && line.payload?.type === 'agent_message';
+}
+
+export function isInterAgentCommunication(line: NativeRecord): boolean {
+  return (line.type === 'inter_agent_communication'
+      && !!line.payload
+      && typeof line.payload === 'object')
+    || isAgentMessageResponse(line);
+}
+
 export function interAgentMessageText(line: NativeRecord): string {
-  return isInterAgentCommunication(line) ? String(line.payload.content ?? '').trim() : '';
+  if (line.type === 'inter_agent_communication') return String(line.payload?.content ?? '').trim();
+  if (!isAgentMessageResponse(line) || !Array.isArray(line.payload.content)) return '';
+  return line.payload.content
+    .map((part: NativeRecord) => typeof part?.text === 'string' ? part.text : '')
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }
 
-function closesPendingEventTwin(line: NativeRecord): boolean {
-  if (line.type === 'response_item') return true;
+function isBarrierLine(line: NativeRecord): boolean {
   if (line.type === 'compacted' || isThreadRolledBack(line)) return true;
-  if (line.type !== 'event_msg') return false;
-  return ['agent_message', 'agent_reasoning', 'item_completed', 'turn_started', 'turn_complete', 'turn_aborted']
-    .includes(String(line.payload?.type || ''));
+  if (line.type === 'response_item') {
+    const pType = String(line.payload?.type || '');
+    if (['reasoning', 'custom_tool_call', 'function_call', 'custom_tool_call_output', 'function_call_output'].includes(pType)) {
+      return true;
+    }
+    if (pType === 'message') {
+      return line.payload?.role !== 'user';
+    }
+    return true;
+  }
+  if (line.type === 'event_msg') {
+    const pType = String(line.payload?.type || '');
+    return ['agent_message', 'agent_reasoning', 'item_completed', 'turn_started', 'turn_complete', 'turn_aborted'].includes(pType);
+  }
+  return false;
 }
 
-// 识别真实用户轮次并去重 event_msg + response_item 双轨记录。
+interface PendingUser {
+  index: number;
+  line: NativeRecord;
+  kind: 'event' | 'response';
+  text: string;
+}
+
+// 识别真实用户轮次并双向去重 event_msg + response_item; 同时兼容当前与 legacy inter-agent 记录。
 export function userTurnBoundaries(lines: NativeRecord[]): UserTurnBoundary[] {
   const boundaries: UserTurnBoundary[] = [];
-  let pendingEventTwin = false;
+  let pending: PendingUser | null = null;
+  let pendingInterAgentMetadata: { index: number; line: NativeRecord } | null = null;
+
+  const finalizePending = () => {
+    if (!pending) return;
+    if (pending.kind === 'event') {
+      boundaries.push({
+        index: pending.index,
+        line: pending.line,
+        kind: 'event',
+        eventIndex: pending.index,
+        text: pending.text,
+      });
+    } else {
+      boundaries.push({
+        index: pending.index,
+        line: pending.line,
+        kind: 'response',
+        responseIndex: pending.index,
+        text: pending.text,
+      });
+    }
+    pending = null;
+  };
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    if (isUserMessageEvent(line)) {
-      boundaries.push({ index, line, kind: 'event' });
-      pendingEventTwin = true;
+
+    if (isInterAgentMetadata(line)) {
+      finalizePending();
+      pendingInterAgentMetadata = { index, line };
       continue;
     }
+
+    const interAgentMetadata = pendingInterAgentMetadata;
+    pendingInterAgentMetadata = null;
+    if (isInterAgentCommunication(line)) {
+      finalizePending();
+      const currentAgentMessage = isAgentMessageResponse(line);
+      const start = currentAgentMessage && interAgentMetadata ? interAgentMetadata : { index, line };
+      boundaries.push({
+        index: start.index,
+        line: start.line,
+        kind: 'inter-agent',
+        text: interAgentMessageText(line),
+        ...(currentAgentMessage ? { interAgentIndex: index } : {}),
+      });
+      continue;
+    }
+
+    if (isUserMessageEvent(line)) {
+      const text = userMessageText(line.payload || {});
+      if (pending) {
+        if (pending.kind === 'response') {
+          const normPending = pending.text.trim();
+          const normCurr = text.trim();
+          if (!normPending || !normCurr || normPending === normCurr) {
+            const eventText = text || pending.text;
+            boundaries.push({
+              index: pending.index,
+              line: pending.line,
+              kind: 'event',
+              eventIndex: index,
+              responseIndex: pending.index,
+              text: eventText,
+            });
+            pending = null;
+            continue;
+          }
+        }
+        finalizePending();
+      }
+      pending = { index, line, kind: 'event', text };
+      continue;
+    }
+
     if (isResponseUserMessage(line)) {
       if (isContextualResponseUser(line)) continue;
-      if (pendingEventTwin) {
-        pendingEventTwin = false;
-        continue;
+      const text = responseUserMessageText(line);
+      if (pending) {
+        if (pending.kind === 'event') {
+          const normPending = pending.text.trim();
+          const normCurr = text.trim();
+          if (!normPending || !normCurr || normPending === normCurr) {
+            const eventText = pending.text || text;
+            boundaries.push({
+              index: pending.index,
+              line: pending.line,
+              kind: 'event',
+              eventIndex: pending.index,
+              responseIndex: index,
+              text: eventText,
+            });
+            pending = null;
+            continue;
+          }
+        }
+        finalizePending();
       }
-      boundaries.push({ index, line, kind: 'response' });
+      pending = { index, line, kind: 'response', text };
       continue;
     }
-    if (isInterAgentCommunication(line)) {
-      boundaries.push({ index, line, kind: 'inter-agent' });
-      pendingEventTwin = false;
-      continue;
+
+    if (isBarrierLine(line)) {
+      finalizePending();
     }
-    if (pendingEventTwin && closesPendingEventTwin(line)) pendingEventTwin = false;
   }
+
+  finalizePending();
   return boundaries;
 }
 

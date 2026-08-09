@@ -7,6 +7,7 @@
 // 迁移工具对齐该判定, 不得改写源文件。
 import fs from 'node:fs';
 import { safeParse } from '../events.ts';
+import { titleFromMessage } from '../title.ts';
 import type { NativeRecord } from '../types.ts';
 
 export interface EffectiveTranscript {
@@ -14,6 +15,8 @@ export interface EffectiveTranscript {
   messages: NativeRecord[];
   customTitle: string | undefined;
   aiTitle: string;
+  // 压缩/裁剪/活跃链修剪之前, 从原始 transcript 提取的首个可用用户提示 (标题兜底)
+  rawTitle: string;
   // 因不在活跃链上而丢弃的 transcript 消息数 (废弃分支 / sidechain 等)
   abandonedCount: number;
   // 因 snipMetadata.removedUuids 从有效历史中去掉的消息数
@@ -155,10 +158,31 @@ export function applyPreservedSegmentRelinks(messages: Map<string, NativeRecord>
     }
     if (!reachedHead) return;
 
+    // 全部校验通过前不得改写或裁剪: 锚点记录缺失、会被裁剪、或锚点父链异常时,
+    // 保守保留多余历史, 避免丢消息或重链成环
     const head = messages.get(headUuid);
-    if (head) {
-      messages.set(headUuid, { ...head, parentUuid: anchorUuid });
+    const anchor = messages.get(anchorUuid);
+    if (!head || !anchor) return;
+
+    // 锚点必须位于最后一次 compact boundary 或之后 (boundary 本身允许), 否则会被裁剪
+    const anchorIdx = entryIndex.get(anchorUuid);
+    if (anchorIdx === undefined || anchorIdx < absoluteLastBoundaryIdx) return;
+
+    // 锚点不得是保留段记录; 其父链也不得进入保留段, 否则 head→anchor→…→tail→head 成环
+    if (preservedUuids.has(anchorUuid)) return;
+    const anchorSeen = new Set<string>();
+    let anchorCur = anchor;
+    for (;;) {
+      const anchorCurUuid = String(anchorCur.uuid);
+      if (anchorSeen.has(anchorCurUuid) || preservedUuids.has(anchorCurUuid)) return;
+      anchorSeen.add(anchorCurUuid);
+      if (typeof anchorCur.parentUuid !== 'string') break;
+      const parent = messages.get(anchorCur.parentUuid);
+      if (!parent) return;
+      anchorCur = parent;
     }
+
+    messages.set(headUuid, { ...head, parentUuid: anchorUuid });
     for (const [uuid, msg] of messages) {
       if (msg.parentUuid === anchorUuid && uuid !== headUuid) {
         messages.set(uuid, { ...msg, parentUuid: tailUuid });
@@ -282,17 +306,39 @@ function extractTitles(entries: NativeRecord[]): { customTitle: string | undefin
   return { customTitle, aiTitle };
 }
 
+// 标题兜底取自修剪前的原始 transcript: compact 会把旧提示词剪出活跃链,
+// 剪完后首条用户消息只剩压缩摘要 (isCompactSummary), 不能当作标题。
+function rawMeaningfulPrompt(entries: NativeRecord[]): string {
+  for (const entry of entries) {
+    if (entry.type !== 'user' || entry.isMeta || entry.isCompactSummary || entry.message?.isCompactSummary) continue;
+    const content = entry.message?.content;
+    if (typeof content === 'string') {
+      const derived = titleFromMessage(content);
+      if (derived) return derived;
+    } else if (Array.isArray(content)) {
+      // 逐块独立判定: IDE/包装文本块可被跳过, 后面的真实提示词块仍能成为标题
+      for (const block of content) {
+        if (block?.type !== 'text') continue;
+        const derived = titleFromMessage(block.text);
+        if (derived) return derived;
+      }
+    }
+  }
+  return '';
+}
+
 // 无 uuid 的旧夹具 / 简化记录: 保持线性顺序, 但仍跳过 isSidechain
-function linearFallback(entries: NativeRecord[], customTitle: string | undefined, aiTitle: string): EffectiveTranscript {
+function linearFallback(entries: NativeRecord[], customTitle: string | undefined, aiTitle: string, rawTitle: string): EffectiveTranscript {
   const messages = entries.filter((e) => isTranscriptMessage(e) && !e.isSidechain);
   const sidechainCount = entries.filter((e) => isTranscriptMessage(e) && e.isSidechain).length;
-  return { messages, customTitle, aiTitle, abandonedCount: sidechainCount, snippedCount: 0 };
+  return { messages, customTitle, aiTitle, rawTitle, abandonedCount: sidechainCount, snippedCount: 0 };
 }
 
 // resume 用的有效 transcript: preserved compact → snip → 从最近非 sidechain leaf 回溯
 // 顺序与 ClaudeCodeRev loadTranscriptFile 一致 (先 compact relink, 再 snip 删链)
 export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscript {
   const { customTitle, aiTitle } = extractTitles(entries);
+  const rawTitle = rawMeaningfulPrompt(entries);
 
   const progressBridge = new Map<string, string | null>();
   const messages = new Map<string, NativeRecord>();
@@ -317,7 +363,7 @@ export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscrip
   }
 
   if (transcriptWithUuid === 0) {
-    return linearFallback(entries, customTitle, aiTitle);
+    return linearFallback(entries, customTitle, aiTitle, rawTitle);
   }
 
   applyPreservedSegmentRelinks(messages);
@@ -326,7 +372,7 @@ export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscrip
   // 与 getLastSessionLog 一致: 最近一条非 sidechain 消息作 leaf
   const leaf = findLatestMessage(messages.values(), (m) => !m.isSidechain);
   if (!leaf) {
-    return { messages: [], customTitle, aiTitle, abandonedCount: messages.size, snippedCount };
+    return { messages: [], customTitle, aiTitle, rawTitle, abandonedCount: messages.size, snippedCount };
   }
 
   const chain = buildConversationChain(messages, leaf);
@@ -336,6 +382,7 @@ export function effectiveTranscript(entries: NativeRecord[]): EffectiveTranscrip
     messages: chain,
     customTitle,
     aiTitle,
+    rawTitle,
     abandonedCount: Math.max(0, messages.size - onChain.size),
     snippedCount,
   };

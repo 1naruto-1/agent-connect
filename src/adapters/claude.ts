@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { atomicWriteFileSync } from '../platform/fs.ts';
 import { homeDirectory } from '../platform/paths.ts';
-import { normalizeTitle, titleFromEvents, titleFromMessage, untitledSession } from '../title.ts';
+import { normalizeTitle, untitledSession } from '../title.ts';
 import {
   effectiveTranscript, isCompactBoundary, loadEffectiveTranscript, loadTranscriptEntries,
 } from './claude-session.ts';
@@ -26,18 +26,12 @@ export function available(): boolean {
   return fs.existsSync(path.join(homeDirectory(), '.claude'));
 }
 
-// Claude 标题优先级与官方 lite metadata 一致: custom-title > ai-title > 首条用户消息
-function sessionTitle(customTitle: string | undefined, aiTitle: string, messages: NativeRecord[]): string {
+// Claude 标题优先级: custom-title > ai-title > 原始首条可用用户提示。
+// 原始提示 (rawTitle) 来自修剪前的 transcript, 避免 compact 后把压缩摘要当成标题。
+function sessionTitle(customTitle: string | undefined, aiTitle: string, rawTitle: string): string {
   const explicit = customTitle !== undefined ? normalizeTitle(customTitle) : normalizeTitle(aiTitle);
   if (explicit) return explicit;
-  for (const l of messages) {
-    if (l.type !== 'user' || l.isMeta) continue;
-    if (typeof l.message?.content === 'string') {
-      const derived = titleFromMessage(l.message.content);
-      if (derived) return derived;
-    }
-  }
-  return '';
+  return rawTitle;
 }
 
 export function listSessions(cwd: string): SessionInfo[] {
@@ -50,7 +44,7 @@ export function listSessions(cwd: string): SessionInfo[] {
     const effective = loadEffectiveTranscript(file);
     sessions.push({
       id: f.replace('.jsonl', ''),
-      title: sessionTitle(effective.customTitle, effective.aiTitle, effective.messages) || '(无标题)',
+      title: sessionTitle(effective.customTitle, effective.aiTitle, effective.rawTitle) || '(无标题)',
       updatedAt: fs.statSync(file).mtimeMs,
       count: effective.messages.length,
     });
@@ -94,7 +88,7 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
   if (!fs.existsSync(file)) throw new Error(`未找到 Claude Code 会话: ${file}`);
   const entries = loadTranscriptEntries(file);
   // 与 Claude --resume 一致: 只迁移 parentUuid 活跃链上的消息
-  const { messages, customTitle, aiTitle, abandonedCount, snippedCount } = effectiveTranscript(entries);
+  const { messages, customTitle, aiTitle, rawTitle, abandonedCount, snippedCount } = effectiveTranscript(entries);
 
   const results = new Map<string, NativeRecord>();
   for (const l of messages) {
@@ -145,8 +139,10 @@ export function readSession(cwd: string, sessionId: string): ReadSessionResult {
       skipped[l.type] = (skipped[l.type] || 0) + 1;
     }
   }
+  // 不再经 titleFromEvents 兜底: 压缩摘要是合法的规范 user 事件, 但 rawTitle 为空时
+  // 事件流兜底会把摘要选成标题; 保持 (无标题)/harness 兜底约定即可。
   return {
-    title: sessionTitle(customTitle, aiTitle, messages) || titleFromEvents(events) || untitledSession(label, sessionId),
+    title: sessionTitle(customTitle, aiTitle, rawTitle) || untitledSession(label, sessionId),
     events,
     skipped,
   };
